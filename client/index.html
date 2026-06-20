@@ -19,7 +19,7 @@
     // is safe to call before the first message arrives.
     let players = [];
 
-    const ws = new WebSocket("ws://localhost:8080/");
+    const ws = new WebSocket(`ws://${location.host}/ws`);
 
     ws.onopen = () => console.log("connected");
     ws.onclose = (e) => console.log("disconnected", e.code, e.reason);
@@ -44,7 +44,7 @@
       }
     }
 
-   
+
     // Track which arrow keys are currently held, derive a direction vector,
     // and only send to the server when that vector actually changes.
     const held = { left: false, right: false, up: false, down: false };

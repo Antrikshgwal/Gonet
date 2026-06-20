@@ -1,4 +1,5 @@
-package main
+// hub package owns all authoritative game state and the fixed-tick game loop.
+package hub
 
 import (
 	"encoding/json"
@@ -8,7 +9,8 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-// InputMsg is a movement input sent by a client.
+// InputMsg is a movement input sent by a client. Exported so other packages
+// (e.g. the bot client) can build and send the same wire format.
 type InputMsg struct {
 	Dx int8 `json:"dx"`
 	Dy int8 `json:"dy"`
@@ -23,17 +25,18 @@ type PlayerState struct {
 	Vy float64 `json:"vy"`
 }
 
-// SnapshotMsg is the full game state sent to all clients each tick.
+// SnapshotMsg is the full game state broadcast to all clients each tick.
 type SnapshotMsg struct {
 	Players []PlayerState `json:"players"`
 }
 
-// inputEvent ties an input message to the connection that sent it.
+// inputEvent ties an input message to the connection that sent it. Private.
 type inputEvent struct {
 	conn *websocket.Conn
 	msg  InputMsg
 }
 
+// Hub is the single source of truth for game state.
 type Hub struct {
 	register   chan *websocket.Conn
 	unregister chan *websocket.Conn
@@ -41,7 +44,8 @@ type Hub struct {
 	clients    map[*websocket.Conn]*PlayerState
 }
 
-func newHub() *Hub {
+// New creates a hub with all channels and the client map initialized.
+func New() *Hub {
 	return &Hub{
 		register:   make(chan *websocket.Conn),
 		unregister: make(chan *websocket.Conn),
@@ -50,11 +54,23 @@ func newHub() *Hub {
 	}
 }
 
-func (h *Hub) run() {
+// Register adds a connection as a new player. Blocks until the run loop
+// accepts it.
+func (h *Hub) Register(conn *websocket.Conn) { h.register <- conn }
 
-	// The speed constant defines how fast players move in units per second.
+// Unregister removes a connection
+func (h *Hub) Unregister(conn *websocket.Conn) { h.unregister <- conn }
+
+// SendInput forwards a client's input to the run loop.
+func (h *Hub) SendInput(conn *websocket.Conn, msg InputMsg) {
+	h.input <- inputEvent{conn: conn, msg: msg}
+}
+
+// Run drives the game loop. Call it once in its own goroutine; it owns all
+// state mutation
+func (h *Hub) Run() {
+	// speed is how fast players move, in units per second.
 	const speed = 200.0
-	// The game loop runs at a fixed tick rate, integrating player positions and broadcasting the game state.
 	const tickRate = 50 * time.Millisecond
 	ticker := time.NewTicker(tickRate)
 	defer ticker.Stop()
@@ -78,7 +94,7 @@ func (h *Hub) run() {
 			}
 
 		case ev := <-h.input:
-			// Input is the player's current intended direction
+			// Input is the player's current intended direction, not a delta.
 			if ps, ok := h.clients[ev.conn]; ok {
 				ps.Vx = float64(ev.msg.Dx) * speed
 				ps.Vy = float64(ev.msg.Dy) * speed
