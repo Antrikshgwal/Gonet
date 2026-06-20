@@ -51,6 +51,10 @@ func newHub() *Hub {
 }
 
 func (h *Hub) run() {
+
+	// The speed constant defines how fast players move in units per second.
+	const speed = 200.0
+	// The game loop runs at a fixed tick rate, integrating player positions and broadcasting the game state.
 	const tickRate = 50 * time.Millisecond
 	ticker := time.NewTicker(tickRate)
 	defer ticker.Stop()
@@ -60,7 +64,10 @@ func (h *Hub) run() {
 		select {
 		case conn := <-h.register:
 			id := conn.RemoteAddr().String()
-			h.clients[conn] = &PlayerState{ID: id}
+			// Stagger spawns so players don't stack on the same pixel.
+			const spawnX, spawnY, spawnStep = 300.0, 200.0, 40.0
+			x := spawnX + float64(len(h.clients))*spawnStep
+			h.clients[conn] = &PlayerState{ID: id, X: x, Y: spawnY}
 			log.Printf("Client registered: %v", id)
 
 		case conn := <-h.unregister:
@@ -71,9 +78,10 @@ func (h *Hub) run() {
 			}
 
 		case ev := <-h.input:
+			// Input is the player's current intended direction
 			if ps, ok := h.clients[ev.conn]; ok {
-				ps.Vx += float64(ev.msg.Dx)
-				ps.Vy += float64(ev.msg.Dy)
+				ps.Vx = float64(ev.msg.Dx) * speed
+				ps.Vy = float64(ev.msg.Dy) * speed
 			}
 
 		case <-ticker.C:
