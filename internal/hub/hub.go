@@ -9,11 +9,45 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-// InputMsg is a movement input sent by a client. Exported so other packages
-// (e.g. the bot client) can build and send the same wire format.
+// InputMsg is a movement input sent by a client.
 type InputMsg struct {
 	Dx int8 `json:"dx"`
 	Dy int8 `json:"dy"`
+	Seq uint64 `json:"seq"` // monotonic per-client sequence number, used by reconciliation
+	Tick uint32 `json:"tick"` // last server tick the client had seen when it sent this
+}
+
+const inputBufferSize = 64
+
+
+// FIFO order at tick time.
+type InputBuffer struct {
+	buf   [inputBufferSize]InputMsg
+	head  int // index of the oldest unread input
+	tail  int // index of the next slot to write
+	count int // number of unread inputs
+}
+
+// Push appends one input. If the buffer is full , it overwrites the oldest input rather than block the tick loop.
+func (b *InputBuffer) Push(in InputMsg) {
+	b.buf[b.tail] = in
+	b.tail = (b.tail + 1) % inputBufferSize
+	if b.count == inputBufferSize {
+		// Full: the write above clobbered the oldest, so advance head too.
+		b.head = (b.head + 1) % inputBufferSize
+	} else {
+		b.count++
+	}
+}
+
+// Drain returns all unread inputs in FIFO order and empties the buffer.
+func (b *InputBuffer) Drain() []InputMsg {
+	out := make([]InputMsg, b.count)
+	for i := 0; i < b.count; i++ {
+		out[i] = b.buf[(b.head+i)%inputBufferSize]
+	}
+	b.head, b.tail, b.count = 0, 0, 0
+	return out
 }
 
 // PlayerState represents the state of a player in the game.
@@ -23,10 +57,14 @@ type PlayerState struct {
 	Y  float64 `json:"y"`
 	Vx float64 `json:"vx"`
 	Vy float64 `json:"vy"`
+	AckSeq uint64 `json:"ackseq"` //  the latest input sequence number the server has processed for this player
+
+	buf *InputBuffer // pending inputs; unexported so json.Marshal skips it
 }
 
 // SnapshotMsg is the full game state broadcast to all clients each tick.
 type SnapshotMsg struct {
+	TickID uint32 `json:"tick_id"`
 	Players []PlayerState `json:"players"`
 }
 
@@ -42,6 +80,7 @@ type Hub struct {
 	unregister chan *websocket.Conn
 	input      chan inputEvent
 	clients    map[*websocket.Conn]*PlayerState
+	tick 	   uint32
 }
 
 // New creates a hub with all channels and the client map initialized.
@@ -51,6 +90,7 @@ func New() *Hub {
 		unregister: make(chan *websocket.Conn),
 		input:      make(chan inputEvent),
 		clients:    make(map[*websocket.Conn]*PlayerState),
+		tick:       0,
 	}
 }
 
@@ -66,8 +106,7 @@ func (h *Hub) SendInput(conn *websocket.Conn, msg InputMsg) {
 	h.input <- inputEvent{conn: conn, msg: msg}
 }
 
-// Run drives the game loop. Call it once in its own goroutine; it owns all
-// state mutation
+
 func (h *Hub) Run() {
 	// speed is how fast players move, in units per second.
 	const speed = 200.0
@@ -83,7 +122,7 @@ func (h *Hub) Run() {
 			// Stagger spawns so players don't stack on the same pixel.
 			const spawnX, spawnY, spawnStep = 300.0, 200.0, 40.0
 			x := spawnX + float64(len(h.clients))*spawnStep
-			h.clients[conn] = &PlayerState{ID: id, X: x, Y: spawnY}
+			h.clients[conn] = &PlayerState{ID: id, X: x, Y: spawnY, buf: &InputBuffer{}}
 			log.Printf("Client registered: %v", id)
 
 		case conn := <-h.unregister:
@@ -94,21 +133,29 @@ func (h *Hub) Run() {
 			}
 
 		case ev := <-h.input:
-			// Input is the player's current intended direction, not a delta.
 			if ps, ok := h.clients[ev.conn]; ok {
-				ps.Vx = float64(ev.msg.Dx) * speed
-				ps.Vy = float64(ev.msg.Dy) * speed
+				ps.buf.Push(ev.msg)
 			}
 
 		case <-ticker.C:
-			// Integrate positions.
+			h.tick++
+			// Drain each player's queued inputs and apply each one as a single
+			// tick-step of movement. One input = one step keeps physics
+			// deterministic and replayable, which is what reconciliation needs.
 			for _, ps := range h.clients {
-				ps.X += ps.Vx * dt
-				ps.Y += ps.Vy * dt
+				for _, in := range ps.buf.Drain() {
+					ps.Vx = float64(in.Dx) * speed
+					ps.Vy = float64(in.Dy) * speed
+					ps.X += ps.Vx * dt
+					ps.Y += ps.Vy * dt
+					if in.Seq > ps.AckSeq {
+						ps.AckSeq = in.Seq
+					}
+				}
 			}
 
 			// Build one snapshot of all players.
-			snapshot := SnapshotMsg{Players: make([]PlayerState, 0, len(h.clients))}
+			snapshot := SnapshotMsg{TickID: h.tick, Players: make([]PlayerState, 0, len(h.clients))}
 			for _, ps := range h.clients {
 				snapshot.Players = append(snapshot.Players, *ps)
 			}

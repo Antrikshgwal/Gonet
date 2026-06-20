@@ -2,10 +2,12 @@ package main
 
 import (
 	"encoding/json"
+	"io/fs"
 	"log"
 	"net/http"
 	"os"
 
+	gonet "github.com/Antrikshgwal/gonet"
 	"github.com/Antrikshgwal/gonet/internal/hub"
 	"github.com/gorilla/websocket"
 )
@@ -23,25 +25,30 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ws", serveWS(h))
 
-	// Serve the static client (index.html, etc.) from the same binary.
-	staticDir := os.Getenv("STATIC_DIR")
-	if staticDir == "" {
-		staticDir = "./client"
+	
+	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("ok"))
+	})
+
+
+	clientFS, err := fs.Sub(gonet.ClientFS, "client")
+	if err != nil {
+		log.Fatalf("failed to open embedded client FS: %v", err)
 	}
-	mux.Handle("/", http.FileServer(http.Dir(staticDir)))
+	mux.Handle("/", http.FileServer(http.FS(clientFS)))
 
 	addr := os.Getenv("ADDR")
 	if addr == "" {
 		addr = ":8080"
 	}
-	log.Printf("server listening on %s (ws at /ws, static from %s)", addr, staticDir)
+	log.Printf("server listening on %s (ws at /ws, static embedded)", addr)
 	if err := http.ListenAndServe(addr, mux); err != nil {
 		log.Fatalf("server failed: %v", err)
 	}
 }
 
-// serveWS upgrades a request to a WebSocket and bridges the connection to the
-// hub: register on connect, forward each input message, unregister on exit.
+
 func serveWS(h *hub.Hub) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		conn, err := upgrader.Upgrade(w, r, nil)
@@ -64,6 +71,7 @@ func serveWS(h *hub.Hub) http.HandlerFunc {
 				log.Printf("Bad input message: %v", err)
 				continue
 			}
+
 			h.SendInput(conn, in)
 		}
 	}

@@ -15,8 +15,9 @@
     const canvas = document.getElementById("game");
     const ctx = canvas.getContext("2d");
 
-    // Latest snapshot received from the server. Starts empty so draw()
-    // is safe to call before the first message arrives.
+    let seq_counter = 0;   // monotonic input sequence number
+    let lastServerTick = 0; // most recent tick_id we've seen in a snapshot
+
     let players = [];
 
     const ws = new WebSocket(`ws://${location.host}/ws`);
@@ -28,12 +29,11 @@
     ws.onmessage = (event) => {
       const snapshot = JSON.parse(event.data);
       players = snapshot.players || [];
+      lastServerTick = snapshot.tick_id || 0; // remember it so inputs can stamp it
       draw(); // redraw whenever fresh state arrives
     };
 
     function draw() {
-      // Canvas is stateless: wipe everything, then repaint every player
-      // at its current position. Skip the clear and you get smears.
       ctx.clearRect(0, 0, canvas.width, canvas.height);
 
       for (const p of players) {
@@ -45,10 +45,8 @@
     }
 
 
-    // Track which arrow keys are currently held, derive a direction vector,
-    // and only send to the server when that vector actually changes.
+   
     const held = { left: false, right: false, up: false, down: false };
-    let lastSent = { dx: 0, dy: 0 };
 
     const keyMap = {
       ArrowLeft: "left",
@@ -57,22 +55,25 @@
       ArrowDown: "down",
     };
 
-    function sendInputIfChanged() {
+    const TICK_MS = 50; // must match the server tick rate
+
+
+    setInterval(() => {
+      if (ws.readyState !== WebSocket.OPEN) return;
       const dx = (held.right ? 1 : 0) - (held.left ? 1 : 0);
       const dy = (held.down ? 1 : 0) - (held.up ? 1 : 0);
-      if (dx === lastSent.dx && dy === lastSent.dy) return;
-      lastSent = { dx, dy };
-      if (ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({ dx, dy }));
-      }
-    }
+      ws.send(JSON.stringify({
+        dx, dy,
+        seq: seq_counter++,
+        tick: lastServerTick,
+      }));
+    }, TICK_MS);
 
     window.addEventListener("keydown", (e) => {
       const dir = keyMap[e.key];
       if (!dir) return;
       e.preventDefault(); // stop arrow keys from scrolling the page
       held[dir] = true;
-      sendInputIfChanged();
     });
 
     window.addEventListener("keyup", (e) => {
@@ -80,7 +81,6 @@
       if (!dir) return;
       e.preventDefault();
       held[dir] = false;
-      sendInputIfChanged();
     });
   </script>
 </body>
