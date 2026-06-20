@@ -13,10 +13,9 @@ RUN CGO_ENABLED=0 go build -o /bin/server ./cmd/server
 # --- run stage ---------------------------------------------------------------
 FROM alpine:3.20
 WORKDIR /app
+# The client is embedded in the binary (go:embed), so nothing else to copy.
 COPY --from=build /bin/server /app/server
-COPY client ./client
 
 ENV ADDR=:8080
-ENV STATIC_DIR=/app/client
 EXPOSE 8080
 ENTRYPOINT ["/app/server"]
