@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/json"
 	"io/fs"
 	"log"
 	"net/http"
@@ -10,6 +9,7 @@ import (
 	gonet "github.com/Antrikshgwal/gonet"
 	"github.com/Antrikshgwal/gonet/internal/hub"
 	"github.com/gorilla/websocket"
+	"github.com/vmihailenco/msgpack/v5"
 )
 
 var upgrader = websocket.Upgrader{
@@ -67,7 +67,7 @@ func serveWS(h *hub.Hub) http.HandlerFunc {
 			}
 
 			var in hub.InputMsg
-			if err := json.Unmarshal(message, &in); err != nil {
+			if err := msgpack.Unmarshal(message, &in); err != nil {
 				log.Printf("Bad input message: %v", err)
 				continue
 			}

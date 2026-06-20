@@ -2,19 +2,20 @@
 package hub
 
 import (
-	"encoding/json"
 	"log"
+	"log/slog"
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/vmihailenco/msgpack/v5"
 )
 
 // InputMsg is a movement input sent by a client.
 type InputMsg struct {
-	Dx int8 `json:"dx"`
-	Dy int8 `json:"dy"`
-	Seq uint64 `json:"seq"` // monotonic per-client sequence number, used by reconciliation
-	Tick uint32 `json:"tick"` // last server tick the client had seen when it sent this
+	Dx int8 `msgpack:"dx"`
+	Dy int8 `msgpack:"dy"`
+	Seq uint64 `msgpack:"seq"` // monotonic per-client sequence number, used by reconciliation
+	Tick uint32 `msgpack:"tick"` // last server tick the client had seen when it sent this
 }
 
 const inputBufferSize = 64
@@ -52,20 +53,20 @@ func (b *InputBuffer) Drain() []InputMsg {
 
 // PlayerState represents the state of a player in the game.
 type PlayerState struct {
-	ID string  `json:"id"`
-	X  float64 `json:"x"`
-	Y  float64 `json:"y"`
-	Vx float64 `json:"vx"`
-	Vy float64 `json:"vy"`
-	AckSeq uint64 `json:"ackseq"` //  the latest input sequence number the server has processed for this player
+	ID string  `msgpack:"id"`
+	X  float64 `msgpack:"x"`
+	Y  float64 `msgpack:"y"`
+	Vx float64 `msgpack:"vx"`
+	Vy float64 `msgpack:"vy"`
+	AckSeq uint64 `msgpack:"ackseq"` // latest input seq the server has simulated for this player
 
-	buf *InputBuffer // pending inputs; unexported so json.Marshal skips it
+	buf *InputBuffer `msgpack:"-"` // pending inputs; never serialized
 }
 
 // SnapshotMsg is the full game state broadcast to all clients each tick.
 type SnapshotMsg struct {
-	TickID uint32 `json:"tick_id"`
-	Players []PlayerState `json:"players"`
+	TickID uint32 `msgpack:"tick_id"`
+	Players []PlayerState `msgpack:"players"`
 }
 
 // inputEvent ties an input message to the connection that sent it. Private.
@@ -138,10 +139,11 @@ func (h *Hub) Run() {
 			}
 
 		case <-ticker.C:
+			tickStart := time.Now()
 			h.tick++
-			// Drain each player's queued inputs and apply each one as a single
-			// tick-step of movement. One input = one step keeps physics
-			// deterministic and replayable, which is what reconciliation needs.
+
+			// One input = one tick-step keeps physics deterministic and
+			// replayable, which is what reconciliation depends on.
 			for _, ps := range h.clients {
 				for _, in := range ps.buf.Drain() {
 					ps.Vx = float64(in.Dx) * speed
@@ -154,24 +156,30 @@ func (h *Hub) Run() {
 				}
 			}
 
-			// Build one snapshot of all players.
 			snapshot := SnapshotMsg{TickID: h.tick, Players: make([]PlayerState, 0, len(h.clients))}
 			for _, ps := range h.clients {
 				snapshot.Players = append(snapshot.Players, *ps)
 			}
-			data, err := json.Marshal(snapshot)
+			data, err := msgpack.Marshal(snapshot)
 			if err != nil {
-				log.Printf("Failed to marshal snapshot: %v", err)
+				log.Printf("marshal snapshot: %v", err)
 				continue
 			}
 
-			// Push it to everyone.
 			for conn := range h.clients {
-				if err := conn.WriteMessage(websocket.TextMessage, data); err != nil {
-					log.Printf("Failed to send snapshot: %v", err)
+				if err := conn.WriteMessage(websocket.BinaryMessage, data); err != nil {
 					conn.Close()
 					delete(h.clients, conn)
 				}
+			}
+
+			elapsed := time.Since(tickStart)
+			if h.tick%20 == 0 { // sample at ~1 Hz instead of flooding at 20 Hz
+				slog.Info("tick", "tick_id", h.tick, "players", len(snapshot.Players),
+					"snapshot_bytes", len(data), "tick_ms", elapsed.Milliseconds())
+			}
+			if elapsed > 40*time.Millisecond {
+				slog.Warn("slow tick", "tick_id", h.tick, "tick_ms", elapsed.Milliseconds())
 			}
 		}
 	}
