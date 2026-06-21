@@ -30,7 +30,9 @@
     let localState = null;      // predicted position of our player
     let seq_counter = 1;        // starts at 1 so server AckSeq=0 means "nothing acked"
     let lastServerTick = 0;
-    const pending = new Map();  // seq -> {dx, dy}, kept for Day 5 reconciliation
+    let lastAppliedTick = 0;    // newest snapshot reconciled against; drops stale ones
+    let lastCorrection = 0;     // size of the last reconciliation snap (for the HUD)
+    const pending = new Map();  // seq -> {dx, dy}, replayed during reconciliation
     const world = {};           // id -> authoritative player state from snapshots
 
     const ws = new WebSocket(`ws://${location.host}/ws`);
@@ -47,12 +49,12 @@
       for (const pd of msg.players || []) world[pd.id] = Object.assign(world[pd.id] || {}, pd);
       for (const id of msg.removed || []) delete world[id];
 
+      // Reconcile only against snapshots newer than the last one applied. (TCP
+      // keeps WS frames ordered, so this is a guard, not a common case.)
       const me = world[myId];
-      if (me) {
-        if (!localState) localState = { x: me.x, y: me.y };
-        if (me.ackseq !== undefined) {
-          for (const seq of pending.keys()) if (seq <= me.ackseq) pending.delete(seq);
-        }
+      if (me && msg.tick_id > lastAppliedTick) {
+        lastAppliedTick = msg.tick_id;
+        reconcile(me);
       }
       draw();
     };
@@ -80,6 +82,22 @@
       draw();
     }, TICK_MS);
 
+
+    function reconcile(me) {
+      for (const seq of pending.keys()) if (seq <= me.ackseq) pending.delete(seq);
+
+      let x = me.x, y = me.y;
+      for (const inp of pending.values()) {
+        x = clamp(x + inp.dx * SPEED * DT, RADIUS, ARENA_W - RADIUS);
+        y = clamp(y + inp.dy * SPEED * DT, RADIUS, ARENA_H - RADIUS);
+      }
+
+      if (!localState) { localState = { x, y }; return; }
+      lastCorrection = Math.hypot(x - localState.x, y - localState.y);
+      localState.x = x;
+      localState.y = y;
+    }
+
     function dot(x, y, color, fill) {
       ctx.beginPath();
       ctx.arc(x, y, RADIUS, 0, Math.PI * 2);
@@ -103,7 +121,7 @@
         const drift = me && localState ? Math.hypot(localState.x - me.x, localState.y - me.y).toFixed(1) : "-";
         ctx.fillStyle = "#aaa";
         ctx.font = "12px monospace";
-        ctx.fillText(`lag=${LAG_MS}ms  pending=${pending.size}  drift=${drift}px`, 10, 18);
+        ctx.fillText(`lag=${LAG_MS}ms  pending=${pending.size}  drift=${drift}px  corr=${lastCorrection.toFixed(2)}px`, 10, 18);
         ctx.fillText("green = predicted   yellow = server", 10, 34);
       }
     }
