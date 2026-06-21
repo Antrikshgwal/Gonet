@@ -4,6 +4,7 @@ package hub
 import (
 	"log"
 	"log/slog"
+	"maps"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -63,12 +64,6 @@ type PlayerState struct {
 	buf *InputBuffer `msgpack:"-"` // pending inputs; never serialized
 }
 
-// SnapshotMsg is the full game state broadcast to all clients each tick.
-type SnapshotMsg struct {
-	TickID uint32 `msgpack:"tick_id"`
-	Players []PlayerState `msgpack:"players"`
-}
-
 // inputEvent ties an input message to the connection that sent it. Private.
 type inputEvent struct {
 	conn *websocket.Conn
@@ -82,6 +77,10 @@ type Hub struct {
 	input      chan inputEvent
 	clients    map[*websocket.Conn]*PlayerState
 	tick 	   uint32
+
+	// lastSent is the world each client was last told about, keyed by player id.
+	// Deltas are computed against it so we only resend fields that changed.
+	lastSent map[*websocket.Conn]map[string]PlayerState
 }
 
 // New creates a hub with all channels and the client map initialized.
@@ -91,7 +90,7 @@ func New() *Hub {
 		unregister: make(chan *websocket.Conn),
 		input:      make(chan inputEvent),
 		clients:    make(map[*websocket.Conn]*PlayerState),
-		tick:       0,
+		lastSent:   make(map[*websocket.Conn]map[string]PlayerState),
 	}
 }
 
@@ -124,11 +123,13 @@ func (h *Hub) Run() {
 			const spawnX, spawnY, spawnStep = 300.0, 200.0, 40.0
 			x := spawnX + float64(len(h.clients))*spawnStep
 			h.clients[conn] = &PlayerState{ID: id, X: x, Y: spawnY, buf: &InputBuffer{}}
+			h.lastSent[conn] = map[string]PlayerState{}
 			log.Printf("Client registered: %v", id)
 
 		case conn := <-h.unregister:
 			if _, ok := h.clients[conn]; ok {
 				delete(h.clients, conn)
+				delete(h.lastSent, conn)
 				conn.Close()
 				log.Printf("Client unregistered: %v", conn.RemoteAddr())
 			}
@@ -156,31 +157,97 @@ func (h *Hub) Run() {
 				}
 			}
 
-			snapshot := SnapshotMsg{TickID: h.tick, Players: make([]PlayerState, 0, len(h.clients))}
+			current := make(map[string]PlayerState, len(h.clients))
 			for _, ps := range h.clients {
-				snapshot.Players = append(snapshot.Players, *ps)
-			}
-			data, err := msgpack.Marshal(snapshot)
-			if err != nil {
-				log.Printf("marshal snapshot: %v", err)
-				continue
+				current[ps.ID] = *ps
 			}
 
+			totalBytes := 0
 			for conn := range h.clients {
+				data := h.buildDelta(conn, current)
+				if data == nil {
+					continue
+				}
 				if err := conn.WriteMessage(websocket.BinaryMessage, data); err != nil {
 					conn.Close()
 					delete(h.clients, conn)
+					delete(h.lastSent, conn)
+					continue
 				}
+				totalBytes += len(data)
 			}
 
 			elapsed := time.Since(tickStart)
 			if h.tick%20 == 0 { // sample at ~1 Hz instead of flooding at 20 Hz
-				slog.Info("tick", "tick_id", h.tick, "players", len(snapshot.Players),
-					"snapshot_bytes", len(data), "tick_ms", elapsed.Milliseconds())
+				slog.Info("tick", "tick_id", h.tick, "players", len(current),
+					"snapshot_bytes", totalBytes, "tick_ms", elapsed.Milliseconds())
 			}
 			if elapsed > 40*time.Millisecond {
 				slog.Warn("slow tick", "tick_id", h.tick, "tick_ms", elapsed.Milliseconds())
 			}
 		}
 	}
+}
+
+// buildDelta computes this client's delta against its lastSent record, updates
+// that record, and returns the encoded frame. Returns nil on a marshal error.
+func (h *Hub) buildDelta(conn *websocket.Conn, current map[string]PlayerState) []byte {
+	delta, next := ComputeDelta(h.tick, current, h.lastSent[conn])
+	h.lastSent[conn] = next
+
+	data, err := msgpack.Marshal(delta)
+	if err != nil {
+		log.Printf("marshal delta: %v", err)
+		return nil
+	}
+	return data
+}
+
+// ComputeDelta returns the wire payload carrying only the fields that changed
+// from last to current, plus the ids that disappeared under "removed". next is
+// the snapshot to remember as the new baseline. Pure (no I/O) so it can be
+// tested directly.
+func ComputeDelta(tick uint32, current, last map[string]PlayerState) (map[string]any, map[string]PlayerState) {
+	players := make([]map[string]any, 0, len(current))
+	for id, cur := range current {
+		prev, seen := last[id]
+		pd := map[string]any{"id": id}
+		if !seen || cur.X != prev.X {
+			pd["x"] = cur.X
+		}
+		if !seen || cur.Y != prev.Y {
+			pd["y"] = cur.Y
+		}
+		if !seen || cur.Vx != prev.Vx {
+			pd["vx"] = cur.Vx
+		}
+		if !seen || cur.Vy != prev.Vy {
+			pd["vy"] = cur.Vy
+		}
+		if !seen || cur.AckSeq != prev.AckSeq {
+			pd["ackseq"] = cur.AckSeq
+		}
+		if len(pd) > 1 { // more than just "id" → something changed
+			players = append(players, pd)
+		}
+	}
+
+	var removed []string
+	for id := range last {
+		if _, ok := current[id]; !ok {
+			removed = append(removed, id)
+		}
+	}
+
+	delta := map[string]any{"tick_id": tick}
+	if len(players) > 0 {
+		delta["players"] = players
+	}
+	if len(removed) > 0 {
+		delta["removed"] = removed
+	}
+
+	next := make(map[string]PlayerState, len(current))
+	maps.Copy(next, current)
+	return delta, next
 }

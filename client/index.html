@@ -19,7 +19,7 @@
 
     let seq_counter = 0;
     let lastServerTick = 0;
-    let players = [];
+    const world = {}; // id -> player state, rebuilt from deltas
 
     const ws = new WebSocket(`ws://${location.host}/ws`);
     ws.binaryType = "arraybuffer";
@@ -29,15 +29,18 @@
     ws.onerror = (e) => console.log("error", e);
 
     ws.onmessage = (event) => {
-      const snapshot = decode(new Uint8Array(event.data));
-      players = snapshot.players || [];
-      lastServerTick = snapshot.tick_id || 0;
+      const msg = decode(new Uint8Array(event.data));
+      if (msg.tick_id !== undefined) lastServerTick = msg.tick_id;
+      for (const pd of msg.players || []) {
+        world[pd.id] = Object.assign(world[pd.id] || {}, pd);
+      }
+      for (const id of msg.removed || []) delete world[id];
       draw();
     };
 
     function draw() {
       ctx.clearRect(0, 0, canvas.width, canvas.height);
-      for (const p of players) {
+      for (const p of Object.values(world)) {
         ctx.beginPath();
         ctx.arc(p.x, p.y, 10, 0, Math.PI * 2);
         ctx.fillStyle = "#4caf50";
