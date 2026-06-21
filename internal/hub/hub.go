@@ -64,6 +64,23 @@ type PlayerState struct {
 	buf *InputBuffer `msgpack:"-"` // pending inputs; never serialized
 }
 
+// Arena bounds.
+const (
+	ArenaW = 1000.0
+	ArenaH = 600.0
+	Radius = 10.0
+)
+
+func clamp(v, lo, hi float64) float64 {
+	if v < lo {
+		return lo
+	}
+	if v > hi {
+		return hi
+	}
+	return v
+}
+
 // inputEvent ties an input message to the connection that sent it. Private.
 type inputEvent struct {
 	conn *websocket.Conn
@@ -149,8 +166,8 @@ func (h *Hub) Run() {
 				for _, in := range ps.buf.Drain() {
 					ps.Vx = float64(in.Dx) * speed
 					ps.Vy = float64(in.Dy) * speed
-					ps.X += ps.Vx * dt
-					ps.Y += ps.Vy * dt
+					ps.X = clamp(ps.X+ps.Vx*dt, Radius, ArenaW-Radius)
+					ps.Y = clamp(ps.Y+ps.Vy*dt, Radius, ArenaH-Radius)
 					if in.Seq > ps.AckSeq {
 						ps.AckSeq = in.Seq
 					}

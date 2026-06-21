@@ -9,7 +9,7 @@
   </style>
 </head>
 <body>
-  <canvas id="game" width="600" height="400"></canvas>
+  <canvas id="game" width="1000" height="600"></canvas>
 
   <script type="module">
     import { encode, decode } from "./msgpack.js";
@@ -75,6 +75,12 @@
       e.preventDefault();
       held[dir] = false;
     });
+
+    // Losing focus eats the matching keyup, which would strand a held direction
+    // and send it forever. Clear all keys whenever the page loses focus.
+    function releaseAll() { for (const k in held) held[k] = false; }
+    window.addEventListener("blur", releaseAll);
+    document.addEventListener("visibilitychange", () => { if (document.hidden) releaseAll(); });
   </script>
 </body>
 </html>
