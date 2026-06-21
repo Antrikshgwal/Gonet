@@ -14,53 +14,99 @@
   <script type="module">
     import { encode, decode } from "./msgpack.js";
 
+    // Physical constants
+    const SPEED = 200, TICK_MS = 50, DT = TICK_MS / 1000;
+    const ARENA_W = 1000, ARENA_H = 600, RADIUS = 10;
+    const clamp = (v, lo, hi) => (v < lo ? lo : v > hi ? hi : v);
+
+    // ?lag=200 injects artificial one-way send latency to make prediction visible.
+    const LAG_MS = Number(new URLSearchParams(location.search).get("lag")) || 0;
+    const DEBUG = true;
+
     const canvas = document.getElementById("game");
     const ctx = canvas.getContext("2d");
 
-    let seq_counter = 0;
+    let myId = null;            // our own player id, learned from the welcome message
+    let localState = null;      // predicted position of our player
+    let seq_counter = 1;        // starts at 1 so server AckSeq=0 means "nothing acked"
     let lastServerTick = 0;
-    const world = {}; // id -> player state, rebuilt from deltas
+    const pending = new Map();  // seq -> {dx, dy}, kept for Day 5 reconciliation
+    const world = {};           // id -> authoritative player state from snapshots
 
     const ws = new WebSocket(`ws://${location.host}/ws`);
     ws.binaryType = "arraybuffer";
-
     ws.onopen = () => console.log("connected");
     ws.onclose = (e) => console.log("disconnected", e.code, e.reason);
     ws.onerror = (e) => console.log("error", e);
 
     ws.onmessage = (event) => {
       const msg = decode(new Uint8Array(event.data));
+      if (msg.you !== undefined) { myId = msg.you; return; }
+
       if (msg.tick_id !== undefined) lastServerTick = msg.tick_id;
-      for (const pd of msg.players || []) {
-        world[pd.id] = Object.assign(world[pd.id] || {}, pd);
-      }
+      for (const pd of msg.players || []) world[pd.id] = Object.assign(world[pd.id] || {}, pd);
       for (const id of msg.removed || []) delete world[id];
+
+      const me = world[myId];
+      if (me) {
+        if (!localState) localState = { x: me.x, y: me.y };
+        if (me.ackseq !== undefined) {
+          for (const seq of pending.keys()) if (seq <= me.ackseq) pending.delete(seq);
+        }
+      }
       draw();
     };
 
-    function draw() {
-      ctx.clearRect(0, 0, canvas.width, canvas.height);
-      for (const p of Object.values(world)) {
-        ctx.beginPath();
-        ctx.arc(p.x, p.y, 10, 0, Math.PI * 2);
-        ctx.fillStyle = "#4caf50";
-        ctx.fill();
-      }
-    }
-
     const held = { left: false, right: false, up: false, down: false };
-    const keyMap = {
-      ArrowLeft: "left", ArrowRight: "right", ArrowUp: "up", ArrowDown: "down",
-    };
+    const keyMap = { ArrowLeft: "left", ArrowRight: "right", ArrowUp: "up", ArrowDown: "down" };
 
-    const TICK_MS = 50;
-
+    // Fixed-rate loop: predict locally and send the same input to the server.
     setInterval(() => {
       if (ws.readyState !== WebSocket.OPEN) return;
       const dx = (held.right ? 1 : 0) - (held.left ? 1 : 0);
       const dy = (held.down ? 1 : 0) - (held.up ? 1 : 0);
-      ws.send(encode({ dx, dy, seq: seq_counter++, tick: lastServerTick }));
+      const seq = seq_counter++;
+      if (dx || dy) pending.set(seq, { dx, dy }); // no-op inputs need no replay
+
+      if (localState) {
+        localState.x = clamp(localState.x + dx * SPEED * DT, RADIUS, ARENA_W - RADIUS);
+        localState.y = clamp(localState.y + dy * SPEED * DT, RADIUS, ARENA_H - RADIUS);
+      }
+
+      const bytes = encode({ dx, dy, seq, tick: lastServerTick });
+      if (LAG_MS > 0) setTimeout(() => ws.readyState === WebSocket.OPEN && ws.send(bytes), LAG_MS);
+      else ws.send(bytes);
+
+      draw();
     }, TICK_MS);
+
+    function dot(x, y, color, fill) {
+      ctx.beginPath();
+      ctx.arc(x, y, RADIUS, 0, Math.PI * 2);
+      if (fill) { ctx.fillStyle = color; ctx.fill(); }
+      else { ctx.lineWidth = 2; ctx.strokeStyle = color; ctx.stroke(); }
+    }
+
+    function draw() {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+      for (const p of Object.values(world)) {
+        if (p.id === myId) continue;
+        dot(p.x, p.y, "#4f8cff", true);
+      }
+
+      const me = world[myId];
+      if (DEBUG && me) dot(me.x, me.y, "#ffd166", false);
+      if (localState) dot(localState.x, localState.y, "#4caf50", true);
+
+      if (DEBUG) {
+        const drift = me && localState ? Math.hypot(localState.x - me.x, localState.y - me.y).toFixed(1) : "-";
+        ctx.fillStyle = "#aaa";
+        ctx.font = "12px monospace";
+        ctx.fillText(`lag=${LAG_MS}ms  pending=${pending.size}  drift=${drift}px`, 10, 18);
+        ctx.fillText("green = predicted   yellow = server", 10, 34);
+      }
+    }
 
     window.addEventListener("keydown", (e) => {
       const dir = keyMap[e.key];
@@ -76,8 +122,6 @@
       held[dir] = false;
     });
 
-    // Losing focus eats the matching keyup, which would strand a held direction
-    // and send it forever. Clear all keys whenever the page loses focus.
     function releaseAll() { for (const k in held) held[k] = false; }
     window.addEventListener("blur", releaseAll);
     document.addEventListener("visibilitychange", () => { if (document.hidden) releaseAll(); });

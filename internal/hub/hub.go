@@ -141,6 +141,11 @@ func (h *Hub) Run() {
 			x := spawnX + float64(len(h.clients))*spawnStep
 			h.clients[conn] = &PlayerState{ID: id, X: x, Y: spawnY, buf: &InputBuffer{}}
 			h.lastSent[conn] = map[string]PlayerState{}
+			// Tell the client which player is it, so it can predict and (Day 5)
+			// reconcile its own entity. Sent from this goroutine, the only writer.
+			if welcome, err := msgpack.Marshal(map[string]any{"you": id}); err == nil {
+				conn.WriteMessage(websocket.BinaryMessage, welcome)
+			}
 			log.Printf("Client registered: %v", id)
 
 		case conn := <-h.unregister:
@@ -206,8 +211,7 @@ func (h *Hub) Run() {
 	}
 }
 
-// buildDelta computes this client's delta against its lastSent record, updates
-// that record, and returns the encoded frame. Returns nil on a marshal error.
+
 func (h *Hub) buildDelta(conn *websocket.Conn, current map[string]PlayerState) []byte {
 	delta, next := ComputeDelta(h.tick, current, h.lastSent[conn])
 	h.lastSent[conn] = next
@@ -220,10 +224,6 @@ func (h *Hub) buildDelta(conn *websocket.Conn, current map[string]PlayerState) [
 	return data
 }
 
-// ComputeDelta returns the wire payload carrying only the fields that changed
-// from last to current, plus the ids that disappeared under "removed". next is
-// the snapshot to remember as the new baseline. Pure (no I/O) so it can be
-// tested directly.
 func ComputeDelta(tick uint32, current, last map[string]PlayerState) (map[string]any, map[string]PlayerState) {
 	players := make([]map[string]any, 0, len(current))
 	for id, cur := range current {
