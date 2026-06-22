@@ -14,13 +14,16 @@
   <script type="module">
     import { encode, decode } from "./msgpack.js";
 
-    // Physical constants
+    // Physics constants — must match the server exactly, or prediction drifts.
     const SPEED = 200, TICK_MS = 50, DT = TICK_MS / 1000;
     const ARENA_W = 1000, ARENA_H = 600, RADIUS = 10;
     const clamp = (v, lo, hi) => (v < lo ? lo : v > hi ? hi : v);
 
-    // ?lag=200 injects artificial one-way send latency to make prediction visible.
-    const LAG_MS = Number(new URLSearchParams(location.search).get("lag")) || 0;
+    // ?lag=200 injects one-way send latency; ?jitter=100 randomizes it.
+    const params = new URLSearchParams(location.search);
+    const LAG_MS = Number(params.get("lag")) || 0;
+    const JITTER_MS = Number(params.get("jitter")) || 0;
+    const INTERP_DELAY = 150; // render remotes this far in the past, between snapshots
     const DEBUG = true;
 
     const canvas = document.getElementById("game");
@@ -32,8 +35,11 @@
     let lastServerTick = 0;
     let lastAppliedTick = 0;    // newest snapshot reconciled against; drops stale ones
     let lastCorrection = 0;     // size of the last reconciliation snap (for the HUD)
+    let rttEma = 0;             // smoothed round-trip time
     const pending = new Map();  // seq -> {dx, dy}, replayed during reconciliation
+    const sentAt = new Map();   // seq -> send time, for RTT measurement
     const world = {};           // id -> authoritative player state from snapshots
+    const history = {};         // id -> [{t, x, y, vx, vy}] samples for interpolation
 
     const ws = new WebSocket(`ws://${location.host}/ws`);
     ws.binaryType = "arraybuffer";
@@ -46,18 +52,32 @@
       if (msg.you !== undefined) { myId = msg.you; return; }
 
       if (msg.tick_id !== undefined) lastServerTick = msg.tick_id;
-      for (const pd of msg.players || []) world[pd.id] = Object.assign(world[pd.id] || {}, pd);
-      for (const id of msg.removed || []) delete world[id];
+      const now = performance.now();
+      for (const pd of msg.players || []) {
+        const p = world[pd.id] = Object.assign(world[pd.id] || {}, pd);
+        recordSample(pd.id, p, now);
+      }
+      for (const id of msg.removed || []) { delete world[id]; delete history[id]; }
 
-      // Reconcile only against snapshots newer than the last one applied. (TCP
-      // keeps WS frames ordered, so this is a guard, not a common case.)
       const me = world[myId];
       if (me && msg.tick_id > lastAppliedTick) {
         lastAppliedTick = msg.tick_id;
+        updateRtt(me.ackseq, now);
         reconcile(me);
       }
-      draw();
     };
+
+    function recordSample(id, p, t) {
+      const buf = history[id] || (history[id] = []);
+      buf.push({ t, x: p.x, y: p.y, vx: p.vx || 0, vy: p.vy || 0 });
+      while (buf.length > 2 && buf[1].t < t - 1000) buf.shift(); // keep ~1s of history
+    }
+
+    function updateRtt(ackseq, now) {
+      const sent = sentAt.get(ackseq);
+      if (sent !== undefined) rttEma = rttEma ? rttEma * 0.9 + (now - sent) * 0.1 : now - sent;
+      for (const seq of sentAt.keys()) if (seq <= ackseq) sentAt.delete(seq);
+    }
 
     const held = { left: false, right: false, up: false, down: false };
     const keyMap = { ArrowLeft: "left", ArrowRight: "right", ArrowUp: "up", ArrowDown: "down" };
@@ -69,6 +89,7 @@
       const dy = (held.down ? 1 : 0) - (held.up ? 1 : 0);
       const seq = seq_counter++;
       if (dx || dy) pending.set(seq, { dx, dy }); // no-op inputs need no replay
+      sentAt.set(seq, performance.now());
 
       if (localState) {
         localState.x = clamp(localState.x + dx * SPEED * DT, RADIUS, ARENA_W - RADIUS);
@@ -76,12 +97,10 @@
       }
 
       const bytes = encode({ dx, dy, seq, tick: lastServerTick });
-      if (LAG_MS > 0) setTimeout(() => ws.readyState === WebSocket.OPEN && ws.send(bytes), LAG_MS);
+      const delay = LAG_MS + (JITTER_MS ? Math.random() * JITTER_MS : 0);
+      if (delay > 0) setTimeout(() => ws.readyState === WebSocket.OPEN && ws.send(bytes), delay);
       else ws.send(bytes);
-
-      draw();
     }, TICK_MS);
-
 
     function reconcile(me) {
       for (const seq of pending.keys()) if (seq <= me.ackseq) pending.delete(seq);
@@ -98,6 +117,28 @@
       localState.y = y;
     }
 
+    // Remote position at renderTime: lerp between the two bracketing samples, or
+    // dead-reckon from the last sample's velocity if we've run past it.
+    function interpolate(buf, renderTime) {
+      const last = buf[buf.length - 1];
+      if (renderTime <= buf[0].t) return { x: buf[0].x, y: buf[0].y };
+      if (renderTime >= last.t) {
+        const dt = Math.min(renderTime - last.t, 250) / 1000;
+        return {
+          x: clamp(last.x + last.vx * dt, RADIUS, ARENA_W - RADIUS),
+          y: clamp(last.y + last.vy * dt, RADIUS, ARENA_H - RADIUS),
+        };
+      }
+      for (let i = 0; i < buf.length - 1; i++) {
+        if (buf[i].t <= renderTime && renderTime <= buf[i + 1].t) {
+          const s0 = buf[i], s1 = buf[i + 1];
+          const a = (renderTime - s0.t) / (s1.t - s0.t || 1);
+          return { x: s0.x + (s1.x - s0.x) * a, y: s0.y + (s1.y - s0.y) * a };
+        }
+      }
+      return { x: last.x, y: last.y };
+    }
+
     function dot(x, y, color, fill) {
       ctx.beginPath();
       ctx.arc(x, y, RADIUS, 0, Math.PI * 2);
@@ -107,24 +148,33 @@
 
     function draw() {
       ctx.clearRect(0, 0, canvas.width, canvas.height);
+      const renderTime = performance.now() - INTERP_DELAY;
 
-      for (const p of Object.values(world)) {
-        if (p.id === myId) continue;
-        dot(p.x, p.y, "#4f8cff", true);
+      let bufDepth = 0;
+      for (const id in world) {
+        if (id === myId) continue;
+        const buf = history[id];
+        if (!buf || buf.length === 0) continue;
+        bufDepth = buf.length;
+        const pos = interpolate(buf, renderTime);
+        dot(pos.x, pos.y, "#4f8cff", true);
       }
 
       const me = world[myId];
-      if (DEBUG && me) dot(me.x, me.y, "#ffd166", false);
-      if (localState) dot(localState.x, localState.y, "#4caf50", true);
+      if (DEBUG && me) dot(me.x, me.y, "#ffd166", false);     // server's view of us
+      if (localState) dot(localState.x, localState.y, "#4caf50", true); // predicted
 
       if (DEBUG) {
         const drift = me && localState ? Math.hypot(localState.x - me.x, localState.y - me.y).toFixed(1) : "-";
         ctx.fillStyle = "#aaa";
         ctx.font = "12px monospace";
-        ctx.fillText(`lag=${LAG_MS}ms  pending=${pending.size}  drift=${drift}px  corr=${lastCorrection.toFixed(2)}px`, 10, 18);
-        ctx.fillText("green = predicted   yellow = server", 10, 34);
+        ctx.fillText(`lag=${LAG_MS}ms jitter=${JITTER_MS}ms  pending=${pending.size}  drift=${drift}px  corr=${lastCorrection.toFixed(2)}px`, 10, 18);
+        ctx.fillText(`rtt=${rttEma.toFixed(0)}ms  interp=${INTERP_DELAY}ms  buf=${bufDepth}`, 10, 34);
+        ctx.fillText("green = predicted   yellow = server   blue = remote (interpolated)", 10, 50);
       }
     }
+
+    (function frame() { draw(); requestAnimationFrame(frame); })();
 
     window.addEventListener("keydown", (e) => {
       const dir = keyMap[e.key];
