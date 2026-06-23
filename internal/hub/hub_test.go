@@ -2,6 +2,7 @@ package hub
 
 import (
 	"encoding/json"
+	"math"
 	"testing"
 
 	"github.com/vmihailenco/msgpack/v5"
@@ -93,6 +94,36 @@ func TestComputeDeltaRemoval(t *testing.T) {
 	}
 	if _, ok := delta["players"]; ok {
 		t.Error("no players remain, players key should be omitted")
+	}
+}
+
+func TestCollisionChargerDrainsStationary(t *testing.T) {
+	// a charges right into a stationary b; they overlap (centers 30 apart, radii 20+20).
+	a := &PlayerState{ID: "a", X: 100, Y: 100, Vx: 200, R: 20}
+	b := &PlayerState{ID: "b", X: 130, Y: 100, R: 20}
+	ResolveCollisions([]*PlayerState{a, b}, 1, 0.05)
+
+	if a.R <= 20 || b.R >= 20 {
+		t.Fatalf("charger should grow and target shrink: a.R=%.3f b.R=%.3f", a.R, b.R)
+	}
+	if delta := (a.R - 20) - (20 - b.R); math.Abs(delta) > 1e-9 {
+		t.Errorf("radius transfer should be conserved, off by %v", delta)
+	}
+}
+
+func TestCollisionLoseAndRespawn(t *testing.T) {
+	a := &PlayerState{ID: "a", X: 100, Y: 100, Vx: 200, R: 20}
+	b := &PlayerState{ID: "b", X: 120, Y: 100, R: LoseRadius + 0.01} // one hit from out
+	ResolveCollisions([]*PlayerState{a, b}, 500, 0.05)
+
+	if b.RespawnAt != 500+RespawnTicks {
+		t.Errorf("loser should be scheduled to respawn, got RespawnAt=%d", b.RespawnAt)
+	}
+	if b.R != 0 {
+		t.Errorf("dead player radius should be 0, got %.3f", b.R)
+	}
+	if a.Score != 1 {
+		t.Errorf("winner should score, got %d", a.Score)
 	}
 }
 

@@ -5,6 +5,8 @@ import (
 	"log"
 	"log/slog"
 	"maps"
+	"math"
+	"math/rand"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -60,15 +62,23 @@ type PlayerState struct {
 	Vx float64 `msgpack:"vx"`
 	Vy float64 `msgpack:"vy"`
 	AckSeq uint64 `msgpack:"ackseq"` // latest input seq the server has simulated for this player
+	R      float64 `msgpack:"r"`     // current radius; shrinks/grows on collision, 0 while dead
+	Score  int     `msgpack:"score"`
+	RespawnAt uint32 `msgpack:"respawn"` // tick at which a dead player respawns; 0 if alive
 
 	buf *InputBuffer `msgpack:"-"` // pending inputs; never serialized
 }
 
-// Arena bounds.
+// Arena bounds and game-mechanic tuning.
 const (
 	ArenaW = 1000.0
 	ArenaH = 600.0
-	Radius = 10.0
+
+	DefaultRadius = 20.0 // spawn size
+	MaxRadius     = 60.0 // growth cap
+	LoseRadius    = 6.0  // shrink to this and you lose the round
+	DrainRate     = 0.06 // how fast charging transfers radius
+	RespawnTicks  = 60   // 3s at 20Hz
 )
 
 func clamp(v, lo, hi float64) float64 {
@@ -139,7 +149,7 @@ func (h *Hub) Run() {
 			// Stagger spawns so players don't stack on the same pixel.
 			const spawnX, spawnY, spawnStep = 300.0, 200.0, 40.0
 			x := spawnX + float64(len(h.clients))*spawnStep
-			h.clients[conn] = &PlayerState{ID: id, X: x, Y: spawnY, buf: &InputBuffer{}}
+			h.clients[conn] = &PlayerState{ID: id, X: x, Y: spawnY, R: DefaultRadius, buf: &InputBuffer{}}
 			h.lastSent[conn] = map[string]PlayerState{}
 			// Tell the client which player is it, so it can predict and (Day 5)
 			// reconcile its own entity. Sent from this goroutine, the only writer.
@@ -165,19 +175,34 @@ func (h *Hub) Run() {
 			tickStart := time.Now()
 			h.tick++
 
+			// Respawn anyone whose countdown elapsed.
+			for _, ps := range h.clients {
+				if ps.RespawnAt != 0 && h.tick >= ps.RespawnAt {
+					ps.RespawnAt = 0
+					ps.R = DefaultRadius
+					ps.X = DefaultRadius + rand.Float64()*(ArenaW-2*DefaultRadius)
+					ps.Y = DefaultRadius + rand.Float64()*(ArenaH-2*DefaultRadius)
+				}
+			}
+
 			// One input = one tick-step keeps physics deterministic and
-			// replayable, which is what reconciliation depends on.
+			// replayable, which is what reconciliation depends on. Dead players
+			// still drain inputs (so ack_seq advances) but don't move.
 			for _, ps := range h.clients {
 				for _, in := range ps.buf.Drain() {
 					ps.Vx = float64(in.Dx) * speed
 					ps.Vy = float64(in.Dy) * speed
-					ps.X = clamp(ps.X+ps.Vx*dt, Radius, ArenaW-Radius)
-					ps.Y = clamp(ps.Y+ps.Vy*dt, Radius, ArenaH-Radius)
+					if ps.RespawnAt == 0 {
+						ps.X = clamp(ps.X+ps.Vx*dt, ps.R, ArenaW-ps.R)
+						ps.Y = clamp(ps.Y+ps.Vy*dt, ps.R, ArenaH-ps.R)
+					}
 					if in.Seq > ps.AckSeq {
 						ps.AckSeq = in.Seq
 					}
 				}
 			}
+
+			h.stepCollisions(dt)
 
 			current := make(map[string]PlayerState, len(h.clients))
 			for _, ps := range h.clients {
@@ -212,6 +237,56 @@ func (h *Hub) Run() {
 }
 
 
+// stepCollisions applies the game rule for every overlapping pair: whoever
+// charges harder into the other (higher closing speed along the line between
+// them) grows while the other shrinks. Shrinking to LoseRadius costs a round.
+func (h *Hub) stepCollisions(dt float64) {
+	players := make([]*PlayerState, 0, len(h.clients))
+	for _, ps := range h.clients {
+		players = append(players, ps)
+	}
+	ResolveCollisions(players, h.tick, dt)
+}
+
+// ResolveCollisions runs the collision rule over every alive pair. Pure (no
+// hub/I-O) so it can be tested directly.
+func ResolveCollisions(players []*PlayerState, tick uint32, dt float64) {
+	alive := make([]*PlayerState, 0, len(players))
+	for _, ps := range players {
+		if ps.RespawnAt == 0 {
+			alive = append(alive, ps)
+		}
+	}
+
+	for i := 0; i < len(alive); i++ {
+		for j := i + 1; j < len(alive); j++ {
+			a, b := alive[i], alive[j]
+			dx, dy := b.X-a.X, b.Y-a.Y
+			dist := math.Hypot(dx, dy)
+			if dist == 0 || dist >= a.R+b.R {
+				continue // not touching
+			}
+			ux, uy := dx/dist, dy/dist // unit vector a -> b
+			approachA := a.Vx*ux + a.Vy*uy
+			approachB := -(b.Vx*ux + b.Vy*uy)
+			delta := (approachA - approachB) * DrainRate * dt
+			a.R = clamp(a.R+delta, 0, MaxRadius)
+			b.R = clamp(b.R-delta, 0, MaxRadius)
+			checkLose(a, b, tick)
+			checkLose(b, a, tick)
+		}
+	}
+}
+
+// checkLose retires loser (3s respawn) and credits winner if loser shrank out.
+func checkLose(loser, winner *PlayerState, tick uint32) {
+	if loser.RespawnAt == 0 && loser.R <= LoseRadius {
+		winner.Score++
+		loser.R = 0
+		loser.RespawnAt = tick + RespawnTicks
+	}
+}
+
 func (h *Hub) buildDelta(conn *websocket.Conn, current map[string]PlayerState) []byte {
 	delta, next := ComputeDelta(h.tick, current, h.lastSent[conn])
 	h.lastSent[conn] = next
@@ -243,6 +318,15 @@ func ComputeDelta(tick uint32, current, last map[string]PlayerState) (map[string
 		}
 		if !seen || cur.AckSeq != prev.AckSeq {
 			pd["ackseq"] = cur.AckSeq
+		}
+		if !seen || cur.R != prev.R {
+			pd["r"] = cur.R
+		}
+		if !seen || cur.Score != prev.Score {
+			pd["score"] = cur.Score
+		}
+		if !seen || cur.RespawnAt != prev.RespawnAt {
+			pd["respawn"] = cur.RespawnAt
 		}
 		if len(pd) > 1 { // more than just "id" → something changed
 			players = append(players, pd)

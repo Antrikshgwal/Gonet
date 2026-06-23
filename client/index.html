@@ -92,8 +92,9 @@
       sentAt.set(seq, performance.now());
 
       if (localState) {
-        localState.x = clamp(localState.x + dx * SPEED * DT, RADIUS, ARENA_W - RADIUS);
-        localState.y = clamp(localState.y + dy * SPEED * DT, RADIUS, ARENA_H - RADIUS);
+        const r = (world[myId] && world[myId].r) || RADIUS;
+        localState.x = clamp(localState.x + dx * SPEED * DT, r, ARENA_W - r);
+        localState.y = clamp(localState.y + dy * SPEED * DT, r, ARENA_H - r);
       }
 
       const bytes = encode({ dx, dy, seq, tick: lastServerTick });
@@ -139,9 +140,9 @@
       return { x: last.x, y: last.y };
     }
 
-    function dot(x, y, color, fill) {
+    function dot(x, y, r, color, fill) {
       ctx.beginPath();
-      ctx.arc(x, y, RADIUS, 0, Math.PI * 2);
+      ctx.arc(x, y, r, 0, Math.PI * 2);
       if (fill) { ctx.fillStyle = color; ctx.fill(); }
       else { ctx.lineWidth = 2; ctx.strokeStyle = color; ctx.stroke(); }
     }
@@ -153,25 +154,49 @@
       let bufDepth = 0;
       for (const id in world) {
         if (id === myId) continue;
+        const p = world[id];
+        if (!p.r) continue; // dead / respawning
         const buf = history[id];
         if (!buf || buf.length === 0) continue;
         bufDepth = buf.length;
         const pos = interpolate(buf, renderTime);
-        dot(pos.x, pos.y, "#4f8cff", true);
+        dot(pos.x, pos.y, p.r, "#4f8cff", true);
       }
 
       const me = world[myId];
-      if (DEBUG && me) dot(me.x, me.y, "#ffd166", false);     // server's view of us
-      if (localState) dot(localState.x, localState.y, "#4caf50", true); // predicted
+      if (me && me.r) {
+        if (DEBUG) dot(me.x, me.y, me.r, "#ffd166", false);              // server's view of us
+        if (localState) dot(localState.x, localState.y, me.r, "#4caf50", true); // predicted
+      }
+
+      drawScores();
+      if (me && me.respawn && me.respawn > lastServerTick) {
+        const secs = Math.ceil((me.respawn - lastServerTick) / 20);
+        ctx.fillStyle = "#ff6b6b";
+        ctx.font = "28px monospace";
+        ctx.textAlign = "center";
+        ctx.fillText(`Respawning in ${secs}…`, canvas.width / 2, canvas.height / 2);
+        ctx.textAlign = "left";
+      }
 
       if (DEBUG) {
-        const drift = me && localState ? Math.hypot(localState.x - me.x, localState.y - me.y).toFixed(1) : "-";
+        const drift = me && localState && me.r ? Math.hypot(localState.x - me.x, localState.y - me.y).toFixed(1) : "-";
         ctx.fillStyle = "#aaa";
         ctx.font = "12px monospace";
         ctx.fillText(`lag=${LAG_MS}ms jitter=${JITTER_MS}ms  pending=${pending.size}  drift=${drift}px  corr=${lastCorrection.toFixed(2)}px`, 10, 18);
         ctx.fillText(`rtt=${rttEma.toFixed(0)}ms  interp=${INTERP_DELAY}ms  buf=${bufDepth}`, 10, 34);
         ctx.fillText("green = predicted   yellow = server   blue = remote (interpolated)", 10, 50);
       }
+    }
+
+    function drawScores() {
+      const parts = [];
+      for (const id in world) parts.push(`${id === myId ? "you" : "opp"} ${world[id].score || 0}`);
+      ctx.fillStyle = "#fff";
+      ctx.font = "16px monospace";
+      ctx.textAlign = "center";
+      ctx.fillText(parts.join("      "), canvas.width / 2, 26);
+      ctx.textAlign = "left";
     }
 
     (function frame() { draw(); requestAnimationFrame(frame); })();
