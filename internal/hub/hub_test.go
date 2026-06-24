@@ -101,7 +101,7 @@ func TestCollisionChargerDrainsStationary(t *testing.T) {
 	// a charges right into a stationary b; they overlap (centers 30 apart, radii 20+20).
 	a := &PlayerState{ID: "a", X: 100, Y: 100, Vx: 200, R: 20}
 	b := &PlayerState{ID: "b", X: 130, Y: 100, R: 20}
-	ResolveCollisions([]*PlayerState{a, b}, 1, 0.05)
+	ResolveCollisions([]*PlayerState{a, b}, 1, 0.05, nil)
 
 	if a.R <= 20 || b.R >= 20 {
 		t.Fatalf("charger should grow and target shrink: a.R=%.3f b.R=%.3f", a.R, b.R)
@@ -114,7 +114,7 @@ func TestCollisionChargerDrainsStationary(t *testing.T) {
 func TestCollisionLoseAndRespawn(t *testing.T) {
 	a := &PlayerState{ID: "a", X: 100, Y: 100, Vx: 200, R: 20}
 	b := &PlayerState{ID: "b", X: 120, Y: 100, R: LoseRadius + 0.01} // one hit from out
-	ResolveCollisions([]*PlayerState{a, b}, 500, 0.05)
+	ResolveCollisions([]*PlayerState{a, b}, 500, 0.05, nil)
 
 	if b.RespawnAt != 500+RespawnTicks {
 		t.Errorf("loser should be scheduled to respawn, got RespawnAt=%d", b.RespawnAt)
@@ -124,6 +124,46 @@ func TestCollisionLoseAndRespawn(t *testing.T) {
 	}
 	if a.Score != 1 {
 		t.Errorf("winner should score, got %d", a.Score)
+	}
+}
+
+func TestCollisionPassThroughNetDrains(t *testing.T) {
+	// a charges fully through a stationary b; b must end up smaller, not bounce
+	// back to its starting size once a exits the far side.
+	a := &PlayerState{ID: "a", X: 100, Y: 200, Vx: 200, R: 20}
+	b := &PlayerState{ID: "b", X: 200, Y: 200, R: 20}
+	for range 16 {
+		a.X += a.Vx * 0.05 // 10px/tick, server-identical
+		ResolveCollisions([]*PlayerState{a, b}, 1, 0.05, nil)
+	}
+	if b.R >= 20 {
+		t.Fatalf("victim should net-shrink after a full pass, ended at %.2f", b.R)
+	}
+	if d := (a.R - 20) - (20 - b.R); math.Abs(d) > 1e-9 {
+		t.Errorf("transfer not conserved, off by %v", d)
+	}
+}
+
+func TestCollisionLagCompensation(t *testing.T) {
+	rewind := func(id string, toTick uint32) (float64, float64, bool) {
+		if id == "b" {
+			return 125, 100, true // where the attacker saw b: in contact
+		}
+		return 0, 0, false
+	}
+	a := &PlayerState{ID: "a", X: 100, Y: 100, Vx: 200, R: 20, lastView: 100}
+	b := &PlayerState{ID: "b", X: 300, Y: 100, R: 20}
+	ResolveCollisions([]*PlayerState{a, b}, 1, 0.05, rewind)
+	if b.R >= 20 {
+		t.Fatalf("hit should register against the rewound position, b.R=%.2f", b.R)
+	}
+
+	// Same geometr: current positions are too far apart → no hit.
+	a2 := &PlayerState{ID: "a", X: 100, Y: 100, Vx: 200, R: 20, lastView: 100}
+	b2 := &PlayerState{ID: "b", X: 300, Y: 100, R: 20}
+	ResolveCollisions([]*PlayerState{a2, b2}, 1, 0.05, nil)
+	if b2.R != 20 {
+		t.Errorf("without rewind the far victim should be untouched, b.R=%.2f", b2.R)
 	}
 }
 

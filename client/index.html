@@ -2,14 +2,144 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <title>Gonet client</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>GONET · netcode scope</title>
   <style>
-    body { margin: 0; background: #111; display: grid; place-items: center; height: 100vh; }
-    canvas { background: #1d1d1d; border: 1px solid #444; }
+    :root {
+      --scope: #0A0F14; --panel: #0F1620; --grid: #1C2A35; --hair: #223040;
+      --ink: #C9D6DF; --dim: #5E7385;
+      --you: #2EE6C0; --srv: #FFB454; --rem: #6E8BFF;
+      --mono: ui-monospace, "JetBrains Mono", "SF Mono", "Cascadia Code", Menlo, Consolas, monospace;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; min-height: 100vh; padding: 28px 20px;
+      background: radial-gradient(120% 80% at 50% -15%, #122230 0%, #0A0F14 58%);
+      color: var(--ink); font-family: var(--mono);
+      font-variant-numeric: tabular-nums;
+      display: grid; place-items: center;
+      -webkit-font-smoothing: antialiased;
+    }
+    .instrument {
+      width: 100%; max-width: 1160px;
+      border: 1px solid var(--hair); border-radius: 8px;
+      background: linear-gradient(180deg, #0E151D, #0A0F14);
+      box-shadow: 0 30px 80px -40px #000, inset 0 1px 0 #1b2733;
+    }
+
+    /* ── header ─────────────────────────────────────────── */
+    .head {
+      display: flex; align-items: center; justify-content: space-between;
+      gap: 16px; flex-wrap: wrap;
+      padding: 14px 18px; border-bottom: 1px solid var(--hair);
+    }
+    .brand { font-size: 17px; font-weight: 700; letter-spacing: .26em; }
+    .brand .unit { color: var(--you); font-weight: 500; font-size: 11px; letter-spacing: .1em; margin-left: 2px; }
+    .score { font-size: 12px; letter-spacing: .18em; color: var(--dim); }
+    .score b { font-size: 15px; font-weight: 700; letter-spacing: 0; margin: 0 4px; }
+    .score .sc-you { color: var(--you); }
+    .score .sc-opp { color: var(--srv); }
+    .score .dash { margin: 0 8px; color: var(--hair); }
+    .status { display: flex; align-items: center; gap: 8px; font-size: 10.5px; letter-spacing: .18em; text-transform: uppercase; color: var(--dim); }
+    .led { width: 8px; height: 8px; border-radius: 50%; background: var(--dim); }
+    .led.on { background: var(--you); animation: pulse 2.2s infinite; }
+    @keyframes pulse { 0% { box-shadow: 0 0 0 0 rgba(46,230,192,.45); } 70% { box-shadow: 0 0 0 7px rgba(46,230,192,0); } 100% { box-shadow: 0 0 0 0 rgba(46,230,192,0); } }
+    .status .sep { color: var(--hair); }
+
+    /* ── stage: scope + telemetry ───────────────────────── */
+    .stage { display: grid; grid-template-columns: minmax(0,1fr) 250px; gap: 16px; padding: 16px; }
+    .scope-wrap { position: relative; }
+    canvas {
+      display: block; width: 100%; height: auto; aspect-ratio: 1000 / 600;
+      background: var(--scope); border: 1px solid var(--grid); border-radius: 4px;
+    }
+    .tick { position: absolute; width: 11px; height: 11px; pointer-events: none; }
+    .tick.tl { top: -4px; left: -4px; border-top: 1px solid var(--you); border-left: 1px solid var(--you); }
+    .tick.tr { top: -4px; right: -4px; border-top: 1px solid var(--you); border-right: 1px solid var(--you); }
+    .tick.bl { bottom: -4px; left: -4px; border-bottom: 1px solid var(--you); border-left: 1px solid var(--you); }
+    .tick.br { bottom: -4px; right: -4px; border-bottom: 1px solid var(--you); border-right: 1px solid var(--you); }
+    .overlay {
+      position: absolute; inset: 1px; display: grid; place-content: center; gap: 6px; text-align: center;
+      background: rgba(10,15,20,.62); border-radius: 4px;
+    }
+    .overlay[hidden] { display: none; }
+    .overlay .ok { font-size: 13px; letter-spacing: .35em; color: var(--srv); }
+    .overlay .ov { font-size: 11px; letter-spacing: .12em; color: var(--dim); }
+
+    /* ── telemetry panel ────────────────────────────────── */
+    .panel { border: 1px solid var(--hair); border-radius: 5px; background: var(--panel); padding: 12px; }
+    .panel-h { font-size: 9.5px; letter-spacing: .3em; color: var(--dim); padding-bottom: 8px; margin-bottom: 10px; border-bottom: 1px solid var(--hair); }
+    .panel-h + .panel-h { margin-top: 16px; }
+    .readouts { display: grid; grid-template-columns: 1fr; gap: 15px; }
+    .cell { display: flex; flex-direction: column; gap: 3px; }
+    .cell .k { font-size: 9px; letter-spacing: .16em; color: var(--dim); }
+    .cell .v { display: flex; align-items: baseline; gap: 4px; }
+    .cell .v i { font-style: normal; font-size: 21px; font-weight: 600; line-height: 1; color: var(--ink); }
+    .cell .v em { font-style: normal; font-size: 9.5px; color: var(--dim); }
+    .chan { display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: 10.5px; color: var(--dim); }
+    .chan b { color: var(--ink); font-weight: 600; }
+    .legend { display: flex; flex-direction: column; gap: 7px; margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--hair); }
+    .lg { display: flex; align-items: center; gap: 8px; font-size: 10.5px; color: var(--dim); }
+    .sw { width: 9px; height: 9px; border-radius: 50%; }
+    .sw.you { background: var(--you); }
+    .sw.srv { background: transparent; border: 1.5px solid var(--srv); }
+    .sw.rem { background: var(--rem); }
+
+    /* ── footer ─────────────────────────────────────────── */
+    .foot { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap;
+      padding: 11px 18px; border-top: 1px solid var(--hair); font-size: 10.5px; color: var(--dim); letter-spacing: .04em; }
+    .foot code { color: var(--you); background: #0c1118; border: 1px solid var(--hair); border-radius: 3px; padding: 1px 5px; }
+
+    :focus-visible { outline: 2px solid var(--you); outline-offset: 2px; }
+
+    @media (max-width: 760px) {
+      .stage { grid-template-columns: 1fr; }
+      .readouts { grid-template-columns: repeat(3, 1fr); }
+      .legend { flex-direction: row; flex-wrap: wrap; gap: 6px 16px; }
+    }
+    @media (prefers-reduced-motion: reduce) { .led.on { animation: none; } }
   </style>
 </head>
 <body>
-  <canvas id="game" width="1000" height="600"></canvas>
+  <div class="instrument">
+    <header class="head">
+      <div class="brand">GONET<span class="unit">/20Hz</span></div>
+      <div class="score">YOU<b class="sc-you" id="sc-you">0</b><span class="dash">—</span>OPP<b class="sc-opp" id="sc-opp">0</b></div>
+      <div class="status"><span class="led" id="led"></span><span id="conn">connecting</span></div>
+    </header>
+
+    <main class="stage">
+      <div class="scope-wrap">
+        <span class="tick tl"></span><span class="tick tr"></span><span class="tick bl"></span><span class="tick br"></span>
+        <canvas id="game" width="1000" height="600"></canvas>
+        <div class="overlay" id="overlay" hidden>
+          <div class="ok">SIGNAL LOST</div>
+          <div class="ov" id="overlay-sub">reacquiring</div>
+        </div>
+      </div>
+
+      <aside class="panel">
+        <div class="panel-h">TELEMETRY</div>
+        <div class="readouts">
+          <div class="cell"><span class="k">RTT</span><span class="v"><i id="t-rtt">—</i><em>ms</em></span></div>
+          <div class="cell"><span class="k">DRIFT</span><span class="v"><i id="t-drift">—</i><em>px</em></span></div>
+          <div class="cell"><span class="k">CORR</span><span class="v"><i id="t-corr">—</i><em>px</em></span></div>
+        </div>
+        <div class="panel-h" id="chan-h" hidden>CHANNEL</div>
+        <div class="chan" id="chan" hidden><span>lag <b id="c-lag">0</b>ms</span><span>jitter <b id="c-jit">0</b>ms</span><span>buf <b id="c-buf">0</b></span></div>
+        <div class="legend">
+          <span class="lg"><i class="sw you"></i>predicted · you</span>
+          <span class="lg"><i class="sw srv"></i>server truth</span>
+          <span class="lg"><i class="sw rem"></i>remote · interpolated</span>
+        </div>
+      </aside>
+    </main>
+
+    <footer class="foot">
+      <span>arrow keys to move · charge into your opponent to drain them</span>
+      <span>append <code>?lag=200</code> or <code>?jitter=100</code> to watch the netcode work</span>
+    </footer>
+  </div>
 
   <script type="module">
     import { encode, decode } from "./msgpack.js";
@@ -24,10 +154,21 @@
     const LAG_MS = Number(params.get("lag")) || 0;
     const JITTER_MS = Number(params.get("jitter")) || 0;
     const INTERP_DELAY = 150; // render remotes this far in the past, between snapshots
-    const DEBUG = true;
+
+    const COL = { scope: "#0A0F14", grid: "#152029", gridMaj: "#1C2A35", you: "#2EE6C0", srv: "#FFB454", rem: "#6E8BFF", dim: "#5E7385" };
 
     const canvas = document.getElementById("game");
     const ctx = canvas.getContext("2d");
+    const W = canvas.width, H = canvas.height;
+    const $ = (id) => document.getElementById(id);
+    const ui = {
+      scYou: $("sc-you"), scOpp: $("sc-opp"), conn: $("conn"), led: $("led"),
+      rtt: $("t-rtt"), drift: $("t-drift"), corr: $("t-corr"),
+      buf: $("c-buf"), overlay: $("overlay"), overlaySub: $("overlay-sub"),
+    };
+    $("c-lag").textContent = LAG_MS;
+    $("c-jit").textContent = JITTER_MS;
+    if (LAG_MS || JITTER_MS) { $("chan").hidden = false; $("chan-h").hidden = false; }
 
     let myId = null;            // our own player id, learned from the welcome message
     let localState = null;      // predicted position of our player
@@ -43,9 +184,9 @@
 
     const ws = new WebSocket(`ws://${location.host}/ws`);
     ws.binaryType = "arraybuffer";
-    ws.onopen = () => console.log("connected");
-    ws.onclose = (e) => console.log("disconnected", e.code, e.reason);
-    ws.onerror = (e) => console.log("error", e);
+    ws.onopen = () => { ui.conn.textContent = "live"; ui.led.classList.add("on"); };
+    ws.onclose = () => { ui.conn.textContent = "offline"; ui.led.classList.remove("on"); };
+    ws.onerror = () => { ui.conn.textContent = "error"; };
 
     ws.onmessage = (event) => {
       const msg = decode(new Uint8Array(event.data));
@@ -140,15 +281,32 @@
       return { x: last.x, y: last.y };
     }
 
-    function dot(x, y, r, color, fill) {
-      ctx.beginPath();
-      ctx.arc(x, y, r, 0, Math.PI * 2);
-      if (fill) { ctx.fillStyle = color; ctx.fill(); }
-      else { ctx.lineWidth = 2; ctx.strokeStyle = color; ctx.stroke(); }
+    function signal(x, y, r, color) {
+      ctx.save();
+      ctx.shadowColor = color; ctx.shadowBlur = 10;
+      ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2);
+      ctx.fillStyle = color; ctx.fill();
+      ctx.restore();
+    }
+    function ring(x, y, r, color) {
+      ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2);
+      ctx.lineWidth = 1.5; ctx.strokeStyle = color; ctx.stroke();
+    }
+
+    function graticule() {
+      ctx.fillStyle = COL.scope; ctx.fillRect(0, 0, W, H);
+      ctx.lineWidth = 1; ctx.strokeStyle = COL.grid; ctx.beginPath();
+      for (let x = 100; x < W; x += 100) { ctx.moveTo(x + 0.5, 0); ctx.lineTo(x + 0.5, H); }
+      for (let y = 100; y < H; y += 100) { ctx.moveTo(0, y + 0.5); ctx.lineTo(W, y + 0.5); }
+      ctx.stroke();
+      ctx.strokeStyle = COL.gridMaj; ctx.beginPath();
+      ctx.moveTo(W / 2 + 0.5, 0); ctx.lineTo(W / 2 + 0.5, H);
+      ctx.moveTo(0, H / 2 + 0.5); ctx.lineTo(W, H / 2 + 0.5);
+      ctx.stroke();
     }
 
     function draw() {
-      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      graticule();
       const renderTime = performance.now() - INTERP_DELAY;
 
       let bufDepth = 0;
@@ -160,46 +318,50 @@
         if (!buf || buf.length === 0) continue;
         bufDepth = buf.length;
         const pos = interpolate(buf, renderTime);
-        dot(pos.x, pos.y, p.r, "#4f8cff", true);
+        signal(pos.x, pos.y, p.r, COL.rem);
       }
 
       const me = world[myId];
+      let drift = "—";
       if (me && me.r) {
-        if (DEBUG) dot(me.x, me.y, me.r, "#ffd166", false);              // server's view of us
-        if (localState) dot(localState.x, localState.y, me.r, "#4caf50", true); // predicted
+        if (localState) {
+          const d = Math.hypot(localState.x - me.x, localState.y - me.y);
+          drift = d.toFixed(1);
+          if (d > 1.2) { // the error vector — prediction drift, drawn as a measured trace
+            ctx.save();
+            ctx.strokeStyle = COL.dim; ctx.lineWidth = 1; ctx.setLineDash([4, 4]);
+            ctx.beginPath(); ctx.moveTo(localState.x, localState.y); ctx.lineTo(me.x, me.y); ctx.stroke();
+            ctx.restore();
+          }
+        }
+        ring(me.x, me.y, me.r, COL.srv);                              // server truth (ghost)
+        if (localState) signal(localState.x, localState.y, me.r, COL.you); // predicted (you)
       }
 
-      drawScores();
+      updateUI(me, drift, bufDepth);
+      requestAnimationFrame(draw);
+    }
+
+    function updateUI(me, drift, bufDepth) {
+      ui.rtt.textContent = rttEma ? rttEma.toFixed(0) : "—";
+      ui.drift.textContent = drift;
+      ui.corr.textContent = lastCorrection.toFixed(1);
+      ui.buf.textContent = bufDepth;
+
+      let you = 0, opp = 0;
+      for (const id in world) { if (id === myId) you = world[id].score || 0; else opp = world[id].score || 0; }
+      ui.scYou.textContent = you;
+      ui.scOpp.textContent = opp;
+
       if (me && me.respawn && me.respawn > lastServerTick) {
-        const secs = Math.ceil((me.respawn - lastServerTick) / 20);
-        ctx.fillStyle = "#ff6b6b";
-        ctx.font = "28px monospace";
-        ctx.textAlign = "center";
-        ctx.fillText(`Respawning in ${secs}…`, canvas.width / 2, canvas.height / 2);
-        ctx.textAlign = "left";
-      }
-
-      if (DEBUG) {
-        const drift = me && localState && me.r ? Math.hypot(localState.x - me.x, localState.y - me.y).toFixed(1) : "-";
-        ctx.fillStyle = "#aaa";
-        ctx.font = "12px monospace";
-        ctx.fillText(`lag=${LAG_MS}ms jitter=${JITTER_MS}ms  pending=${pending.size}  drift=${drift}px  corr=${lastCorrection.toFixed(2)}px`, 10, 18);
-        ctx.fillText(`rtt=${rttEma.toFixed(0)}ms  interp=${INTERP_DELAY}ms  buf=${bufDepth}`, 10, 34);
-        ctx.fillText("green = predicted   yellow = server   blue = remote (interpolated)", 10, 50);
+        ui.overlay.hidden = false;
+        ui.overlaySub.textContent = "reacquiring in " + Math.ceil((me.respawn - lastServerTick) / 20) + "s";
+      } else {
+        ui.overlay.hidden = true;
       }
     }
 
-    function drawScores() {
-      const parts = [];
-      for (const id in world) parts.push(`${id === myId ? "you" : "opp"} ${world[id].score || 0}`);
-      ctx.fillStyle = "#fff";
-      ctx.font = "16px monospace";
-      ctx.textAlign = "center";
-      ctx.fillText(parts.join("      "), canvas.width / 2, 26);
-      ctx.textAlign = "left";
-    }
-
-    (function frame() { draw(); requestAnimationFrame(frame); })();
+    requestAnimationFrame(draw);
 
     window.addEventListener("keydown", (e) => {
       const dir = keyMap[e.key];

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"io/fs"
 	"log"
 	"net/http"
@@ -29,6 +30,13 @@ func main() {
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("ok"))
+	})
+
+	// Lobby: a JSON view of who's connected. Control-plane endpoint for tools
+	// and humans, so it's plain HTTP/JSON rather than the binary WS protocol.
+	mux.HandleFunc("/lobby", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(h.Lobby())
 	})
 
 

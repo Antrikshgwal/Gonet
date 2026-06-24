@@ -66,7 +66,8 @@ type PlayerState struct {
 	Score  int     `msgpack:"score"`
 	RespawnAt uint32 `msgpack:"respawn"` // tick at which a dead player respawns; 0 if alive
 
-	buf *InputBuffer `msgpack:"-"` // pending inputs; never serialized
+	buf      *InputBuffer `msgpack:"-"` // pending inputs; never serialized
+	lastView uint32       `msgpack:"-"` // server tick this player's latest input was based on
 }
 
 // Arena bounds and game-mechanic tuning.
@@ -77,7 +78,7 @@ const (
 	DefaultRadius = 20.0 // spawn size
 	MaxRadius     = 60.0 // growth cap
 	LoseRadius    = 6.0  // shrink to this and you lose the round
-	DrainRate     = 0.06 // how fast charging transfers radius
+	DrainRate     = 0.12 // how fast charging transfers radius
 	RespawnTicks  = 60   // 3s at 20Hz
 )
 
@@ -97,13 +98,36 @@ type inputEvent struct {
 	msg  InputMsg
 }
 
+// histFrame is one tick of past positions, kept so collisions can be checked
+// against where a player was at the attacker's view time (lag compensation).
+// Never serialized — pure server-side state.
+type histFrame struct {
+	tick uint32
+	pos  map[string][2]float64
+}
+
+const histLen = 30    // 1.5s of world history at 20Hz
+const interpTicks = 3 // clients view remotes ~150ms (3 ticks) in the past
+
+// LobbyPlayer is the public view of a connected player. Served as JSON at
+// GET /lobby — an HTTP control-plane endpoint, not the binary game channel.
+type LobbyPlayer struct {
+	ID    string `json:"id"`
+	Score int    `json:"score"`
+	Alive bool   `json:"alive"`
+}
+
+type lobbyReq struct{ resp chan []LobbyPlayer }
+
 // Hub is the single source of truth for game state.
 type Hub struct {
 	register   chan *websocket.Conn
 	unregister chan *websocket.Conn
 	input      chan inputEvent
+	lobby      chan lobbyReq
 	clients    map[*websocket.Conn]*PlayerState
 	tick 	   uint32
+	hist       []histFrame
 
 	// lastSent is the world each client was last told about, keyed by player id.
 	// Deltas are computed against it so we only resend fields that changed.
@@ -116,9 +140,18 @@ func New() *Hub {
 		register:   make(chan *websocket.Conn),
 		unregister: make(chan *websocket.Conn),
 		input:      make(chan inputEvent),
+		lobby:      make(chan lobbyReq),
 		clients:    make(map[*websocket.Conn]*PlayerState),
 		lastSent:   make(map[*websocket.Conn]map[string]PlayerState),
 	}
+}
+
+// Lobby returns a snapshot of connected players. Safe to call from HTTP
+// handlers — it round-trips through the run loop, which owns the state.
+func (h *Hub) Lobby() []LobbyPlayer {
+	resp := make(chan []LobbyPlayer)
+	h.lobby <- lobbyReq{resp: resp}
+	return <-resp
 }
 
 // Register adds a connection as a new player. Blocks until the run loop
@@ -171,6 +204,13 @@ func (h *Hub) Run() {
 				ps.buf.Push(ev.msg)
 			}
 
+		case req := <-h.lobby:
+			players := make([]LobbyPlayer, 0, len(h.clients))
+			for _, ps := range h.clients {
+				players = append(players, LobbyPlayer{ID: ps.ID, Score: ps.Score, Alive: ps.RespawnAt == 0})
+			}
+			req.resp <- players
+
 		case <-ticker.C:
 			tickStart := time.Now()
 			h.tick++
@@ -199,10 +239,12 @@ func (h *Hub) Run() {
 					if in.Seq > ps.AckSeq {
 						ps.AckSeq = in.Seq
 					}
+					ps.lastView = in.Tick // the server tick this input was based on
 				}
 			}
 
 			h.stepCollisions(dt)
+			h.recordHistory()
 
 			current := make(map[string]PlayerState, len(h.clients))
 			for _, ps := range h.clients {
@@ -237,20 +279,46 @@ func (h *Hub) Run() {
 }
 
 
-// stepCollisions applies the game rule for every overlapping pair: whoever
-// charges harder into the other (higher closing speed along the line between
-// them) grows while the other shrinks. Shrinking to LoseRadius costs a round.
 func (h *Hub) stepCollisions(dt float64) {
 	players := make([]*PlayerState, 0, len(h.clients))
 	for _, ps := range h.clients {
 		players = append(players, ps)
 	}
-	ResolveCollisions(players, h.tick, dt)
+	ResolveCollisions(players, h.tick, dt, h.rewind)
 }
 
-// ResolveCollisions runs the collision rule over every alive pair. Pure (no
-// hub/I-O) so it can be tested directly.
-func ResolveCollisions(players []*PlayerState, tick uint32, dt float64) {
+// rewind returns where id was at or before toTick, from the history ring.
+func (h *Hub) rewind(id string, toTick uint32) (float64, float64, bool) {
+	for i := len(h.hist) - 1; i >= 0; i-- {
+		if h.hist[i].tick <= toTick {
+			if p, ok := h.hist[i].pos[id]; ok {
+				return p[0], p[1], true
+			}
+		}
+	}
+	return 0, 0, false
+}
+
+// recordHistory appends the current world positions to the ring buffer so
+// later ticks can rewind for lag compensation.
+func (h *Hub) recordHistory() {
+	frame := histFrame{tick: h.tick, pos: make(map[string][2]float64, len(h.clients))}
+	for _, ps := range h.clients {
+		frame.pos[ps.ID] = [2]float64{ps.X, ps.Y}
+	}
+	h.hist = append(h.hist, frame)
+	if len(h.hist) > histLen {
+		h.hist = h.hist[1:]
+	}
+}
+
+// ResolveCollisions runs the collision rule over every alive pair. The attacker
+// is whoever charges harder along the line between the two; the victim is
+// rewound to where the attacker saw it (lag compensation) for the hit test, so
+// a charge that connected on the attacker's screen still connects despite lag.
+// rewind may be nil (then current positions are used). Pure of hub state so it
+// can be tested directly.
+func ResolveCollisions(players []*PlayerState, tick uint32, dt float64, rewind func(id string, toTick uint32) (float64, float64, bool)) {
 	alive := make([]*PlayerState, 0, len(players))
 	for _, ps := range players {
 		if ps.RespawnAt == 0 {
@@ -261,19 +329,48 @@ func ResolveCollisions(players []*PlayerState, tick uint32, dt float64) {
 	for i := 0; i < len(alive); i++ {
 		for j := i + 1; j < len(alive); j++ {
 			a, b := alive[i], alive[j]
+
 			dx, dy := b.X-a.X, b.Y-a.Y
 			dist := math.Hypot(dx, dy)
-			if dist == 0 || dist >= a.R+b.R {
-				continue // not touching
+			if dist == 0 {
+				continue
 			}
-			ux, uy := dx/dist, dy/dist // unit vector a -> b
-			approachA := a.Vx*ux + a.Vy*uy
-			approachB := -(b.Vx*ux + b.Vy*uy)
-			delta := (approachA - approachB) * DrainRate * dt
-			a.R = clamp(a.R+delta, 0, MaxRadius)
-			b.R = clamp(b.R-delta, 0, MaxRadius)
-			checkLose(a, b, tick)
-			checkLose(b, a, tick)
+			ux, uy := dx/dist, dy/dist
+			apprA := a.Vx*ux + a.Vy*uy    // a charging toward b
+			apprB := -(b.Vx*ux + b.Vy*uy) // b charging toward a
+
+			attacker, victim, attAppr, vicAppr := a, b, apprA, apprB
+			if apprB > apprA {
+				attacker, victim, attAppr, vicAppr = b, a, apprB, apprA
+			}
+			// attAppr<=0 means nobody is closing (separating/stationary). This
+			// also stops a pass-through from draining in reverse on the way out.
+			if attAppr <= 0 {
+				continue
+			}
+
+			// Lag compensation: test against where the attacker saw the victim.
+			vx, vy := victim.X, victim.Y
+			if rewind != nil {
+				viewTick := attacker.lastView
+				if viewTick > interpTicks {
+					viewTick -= interpTicks // clients render remotes ~150ms back too
+				}
+				if rx, ry, ok := rewind(victim.ID, viewTick); ok {
+					vx, vy = rx, ry
+				}
+			}
+			if hx, hy := vx-attacker.X, vy-attacker.Y; math.Hypot(hx, hy) >= attacker.R+victim.R {
+				continue // no contact at the attacker's view time
+			}
+
+			delta := (attAppr - vicAppr) * DrainRate * dt
+			if delta <= 0 {
+				continue
+			}
+			attacker.R = clamp(attacker.R+delta, 0, MaxRadius)
+			victim.R = clamp(victim.R-delta, 0, MaxRadius)
+			checkLose(victim, attacker, tick)
 		}
 	}
 }
