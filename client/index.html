@@ -102,7 +102,7 @@
 
     // Physics constants — must match the server exactly, or prediction drifts.
     const SPEED = 200, TICK_MS = 50, DT = TICK_MS / 1000;
-    const ARENA_W = 1000, ARENA_H = 600, RADIUS = 10;
+    const ARENA_W = 1280, ARENA_H = 720, RADIUS = 10;
     const clamp = (v, lo, hi) => (v < lo ? lo : v > hi ? hi : v);
 
     // ?lag=200 injects one-way send latency; ?jitter=100 randomizes it.
@@ -254,16 +254,22 @@
       ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.lineWidth = 1.5 / SCALE; ctx.strokeStyle = color; ctx.stroke();
     }
 
-    function graticule() {
-      ctx.lineWidth = 1 / SCALE; ctx.strokeStyle = COL.grid; ctx.beginPath();
-      for (let x = 100; x < ARENA_W; x += 100) { ctx.moveTo(x, 0); ctx.lineTo(x, ARENA_H); }
-      for (let y = 100; y < ARENA_H; y += 100) { ctx.moveTo(0, y); ctx.lineTo(ARENA_W, y); }
+    // Grid drawn in screen space across the whole viewport (aligned to the
+    // field origin), so margins read as continuous scope, never black bars.
+    function screenGrid(cw, ch, ox, oy) {
+      const step = 100 * SCALE;
+      ctx.lineWidth = 1; ctx.strokeStyle = COL.grid; ctx.beginPath();
+      for (let x = ((ox % step) + step) % step; x < cw; x += step) { ctx.moveTo(x + 0.5, 0); ctx.lineTo(x + 0.5, ch); }
+      for (let y = ((oy % step) + step) % step; y < ch; y += step) { ctx.moveTo(0, y + 0.5); ctx.lineTo(cw, y + 0.5); }
       ctx.stroke();
-      ctx.strokeStyle = COL.gridMaj; ctx.beginPath();
+    }
+    // Brighter center cross + the play-field boundary, in world space.
+    function field() {
+      ctx.strokeStyle = COL.gridMaj; ctx.lineWidth = 1 / SCALE; ctx.beginPath();
       ctx.moveTo(ARENA_W / 2, 0); ctx.lineTo(ARENA_W / 2, ARENA_H);
       ctx.moveTo(0, ARENA_H / 2); ctx.lineTo(ARENA_W, ARENA_H / 2);
       ctx.stroke();
-      ctx.strokeStyle = COL.gridMaj; ctx.lineWidth = 1.5 / SCALE; ctx.strokeRect(0, 0, ARENA_W, ARENA_H);
+      ctx.lineWidth = 1.5 / SCALE; ctx.strokeRect(0, 0, ARENA_W, ARENA_H);
     }
 
     function draw() {
@@ -273,9 +279,10 @@
 
       ctx.setTransform(1, 0, 0, 1, 0, 0);
       ctx.fillStyle = COL.scope; ctx.fillRect(0, 0, cw, ch);
-      ctx.setTransform(SCALE, 0, 0, SCALE, ox, oy); // enter world space
+      screenGrid(cw, ch, ox, oy);                   // full-viewport grid
+      ctx.setTransform(SCALE, 0, 0, SCALE, ox, oy);  // enter world space
+      field();
 
-      graticule();
       const renderTime = performance.now() - INTERP_DELAY;
 
       let bufDepth = 0;
