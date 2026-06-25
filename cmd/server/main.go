@@ -5,6 +5,7 @@ import (
 	"io/fs"
 	"log"
 	"net/http"
+	_ "net/http/pprof" // registers /debug/pprof handlers on the default mux
 	"os"
 
 	gonet "github.com/Antrikshgwal/gonet"
@@ -16,14 +17,19 @@ import (
 var upgrader = websocket.Upgrader{
 	ReadBufferSize:  1024,
 	WriteBufferSize: 1024,
-	CheckOrigin: func(r *http.Request) bool { return true },
+	CheckOrigin:     func(r *http.Request) bool { return true },
 }
 
 func main() {
+	// pprof on a separate localhost port for profiling under load.
+	go func() { log.Println(http.ListenAndServe("localhost:6060", nil)) }()
+
 	h := hub.New()
 
 	if path := os.Getenv("RECORD"); path != "" {
-		f, err := os.Create(path)
+		// Append so recordings accumulate across sessions instead of being
+		// truncated each run.
+		f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 		if err != nil {
 			log.Fatalf("open record file: %v", err)
 		}
@@ -34,7 +40,12 @@ func main() {
 				enc.Encode(s)
 			}
 		}()
-		h.Record(func(s hub.Sample) { select { case ch <- s: default: } })
+		h.Record(func(s hub.Sample) {
+			select {
+			case ch <- s:
+			default:
+			}
+		})
 		log.Printf("recording samples to %s", path)
 	}
 
@@ -42,7 +53,6 @@ func main() {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ws", serveWS(h))
-
 
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -55,7 +65,6 @@ func main() {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(h.Lobby())
 	})
-
 
 	clientFS, err := fs.Sub(gonet.ClientFS, "client")
 	if err != nil {
@@ -78,7 +87,6 @@ func main() {
 		log.Fatalf("server failed: %v", err)
 	}
 }
-
 
 func serveWS(h *hub.Hub) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
