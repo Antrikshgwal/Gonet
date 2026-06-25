@@ -72,15 +72,37 @@ type PlayerState struct {
 
 // Arena bounds and game-mechanic tuning.
 const (
-	ArenaW = 1000.0
-	ArenaH = 600.0
+	ArenaW = 1280.0
+	ArenaH = 720.0
+
+	Speed = 200.0 // movement units per second
 
 	DefaultRadius = 20.0 // spawn size
 	MaxRadius     = 60.0 // growth cap
 	LoseRadius    = 6.0  // shrink to this and you lose the round
-	DrainRate     = 0.12 // how fast charging transfers radius
+	DrainRate     = 0.05 // how fast charging transfers radius
 	RespawnTicks  = 60   // 3s at 20Hz
 )
+
+// Features is the normalized behavior-cloning input for self against opponent
+// opp: dx/dy to the opponent and both radii. It's deliberately *positional* —
+// no own-velocity term, because feeding velocity back in makes the clone copy
+// momentum ("keep going the way I'm going") and stick against walls. The bot
+// and recorder both go through this so training and inference agree exactly.
+func Features(self, opp PlayerState) [4]float64 {
+	return [4]float64{
+		(opp.X - self.X) / ArenaW,
+		(opp.Y - self.Y) / ArenaH,
+		self.R / MaxRadius,
+		opp.R / MaxRadius,
+	}
+}
+
+// Sample is one recorded (state, action) pair for behavior cloning.
+type Sample struct {
+	F [4]float64 `json:"f"`
+	A [2]int8    `json:"a"` // the dx, dy the player chose
+}
 
 func clamp(v, lo, hi float64) float64 {
 	if v < lo {
@@ -128,6 +150,7 @@ type Hub struct {
 	clients    map[*websocket.Conn]*PlayerState
 	tick 	   uint32
 	hist       []histFrame
+	onSample   func(Sample) // optional behavior-cloning recorder; nil = off
 
 	// lastSent is the world each client was last told about, keyed by player id.
 	// Deltas are computed against it so we only resend fields that changed.
@@ -154,6 +177,10 @@ func (h *Hub) Lobby() []LobbyPlayer {
 	return <-resp
 }
 
+// Record installs a behavior-cloning recorder, called once per alive player
+// each tick while exactly two players are in the arena. Set before Run.
+func (h *Hub) Record(fn func(Sample)) { h.onSample = fn }
+
 // Register adds a connection as a new player. Blocks until the run loop
 // accepts it.
 func (h *Hub) Register(conn *websocket.Conn) { h.register <- conn }
@@ -168,8 +195,7 @@ func (h *Hub) SendInput(conn *websocket.Conn, msg InputMsg) {
 
 
 func (h *Hub) Run() {
-	// speed is how fast players move, in units per second.
-	const speed = 200.0
+	const speed = Speed
 	const tickRate = 50 * time.Millisecond
 	ticker := time.NewTicker(tickRate)
 	defer ticker.Stop()
@@ -179,10 +205,10 @@ func (h *Hub) Run() {
 		select {
 		case conn := <-h.register:
 			id := conn.RemoteAddr().String()
-			// Stagger spawns so players don't stack on the same pixel.
-			const spawnX, spawnY, spawnStep = 300.0, 200.0, 40.0
-			x := spawnX + float64(len(h.clients))*spawnStep
-			h.clients[conn] = &PlayerState{ID: id, X: x, Y: spawnY, R: DefaultRadius, buf: &InputBuffer{}}
+			// Spread spawns across the arena so players start apart, not stacked:
+			// first at 30% width, second at 70%, both vertically centered.
+			x := ArenaW * (0.3 + 0.4*float64(len(h.clients)))
+			h.clients[conn] = &PlayerState{ID: id, X: x, Y: ArenaH / 2, R: DefaultRadius, buf: &InputBuffer{}}
 			h.lastSent[conn] = map[string]PlayerState{}
 			// Tell the client which player is it, so it can predict and (Day 5)
 			// reconcile its own entity. Sent from this goroutine, the only writer.
@@ -245,6 +271,7 @@ func (h *Hub) Run() {
 
 			h.stepCollisions(dt)
 			h.recordHistory()
+			h.recordSamples()
 
 			current := make(map[string]PlayerState, len(h.clients))
 			for _, ps := range h.clients {
@@ -312,12 +339,30 @@ func (h *Hub) recordHistory() {
 	}
 }
 
-// ResolveCollisions runs the collision rule over every alive pair. The attacker
-// is whoever charges harder along the line between the two; the victim is
-// rewound to where the attacker saw it (lag compensation) for the hit test, so
-// a charge that connected on the attacker's screen still connects despite lag.
-// rewind may be nil (then current positions are used). Pure of hub state so it
-// can be tested directly.
+
+func (h *Hub) recordSamples() {
+	if h.onSample == nil {
+		return
+	}
+	alive := make([]*PlayerState, 0, len(h.clients))
+	for _, ps := range h.clients {
+		if ps.RespawnAt == 0 {
+			alive = append(alive, ps)
+		}
+	}
+	if len(alive) != 2 {
+		return
+	}
+	for i, self := range alive {
+		opp := alive[1-i]
+		h.onSample(Sample{
+			F: Features(*self, *opp),
+			A: [2]int8{int8(math.Round(self.Vx / Speed)), int8(math.Round(self.Vy / Speed))},
+		})
+	}
+}
+
+
 func ResolveCollisions(players []*PlayerState, tick uint32, dt float64, rewind func(id string, toTick uint32) (float64, float64, bool)) {
 	alive := make([]*PlayerState, 0, len(players))
 	for _, ps := range players {

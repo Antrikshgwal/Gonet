@@ -21,6 +21,23 @@ var upgrader = websocket.Upgrader{
 
 func main() {
 	h := hub.New()
+
+	if path := os.Getenv("RECORD"); path != "" {
+		f, err := os.Create(path)
+		if err != nil {
+			log.Fatalf("open record file: %v", err)
+		}
+		ch := make(chan hub.Sample, 4096)
+		go func() {
+			enc := json.NewEncoder(f)
+			for s := range ch {
+				enc.Encode(s)
+			}
+		}()
+		h.Record(func(s hub.Sample) { select { case ch <- s: default: } })
+		log.Printf("recording samples to %s", path)
+	}
+
 	go h.Run()
 
 	mux := http.NewServeMux()
