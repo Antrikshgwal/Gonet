@@ -12,133 +12,89 @@
       --mono: ui-monospace, "JetBrains Mono", "SF Mono", "Cascadia Code", Menlo, Consolas, monospace;
     }
     * { box-sizing: border-box; }
-    body {
-      margin: 0; min-height: 100vh; padding: 28px 20px;
-      background: radial-gradient(120% 80% at 50% -15%, #122230 0%, #0A0F14 58%);
-      color: var(--ink); font-family: var(--mono);
-      font-variant-numeric: tabular-nums;
-      display: grid; place-items: center;
-      -webkit-font-smoothing: antialiased;
-    }
-    .instrument {
-      width: 100%; max-width: 1160px;
-      border: 1px solid var(--hair); border-radius: 8px;
-      background: linear-gradient(180deg, #0E151D, #0A0F14);
-      box-shadow: 0 30px 80px -40px #000, inset 0 1px 0 #1b2733;
-    }
+    html, body { height: 100%; margin: 0; overflow: hidden; }
+    body { background: var(--scope); color: var(--ink); font-family: var(--mono); font-variant-numeric: tabular-nums; -webkit-font-smoothing: antialiased; }
+    #game { position: fixed; inset: 0; width: 100%; height: 100%; display: block; background: var(--scope); }
 
-    /* ── header ─────────────────────────────────────────── */
-    .head {
-      display: flex; align-items: center; justify-content: space-between;
-      gap: 16px; flex-wrap: wrap;
-      padding: 14px 18px; border-bottom: 1px solid var(--hair);
-    }
-    .brand { font-size: 17px; font-weight: 700; letter-spacing: .26em; }
-    .brand .unit { color: var(--you); font-weight: 500; font-size: 11px; letter-spacing: .1em; margin-left: 2px; }
+    .hud { position: fixed; z-index: 2; }
+
+    /* top bar */
+    .bar { top: 0; left: 0; right: 0; display: flex; align-items: center; justify-content: space-between;
+      gap: 16px; padding: 13px 20px; background: linear-gradient(180deg, rgba(8,12,17,.82), rgba(8,12,17,0)); }
+    .brand { font-size: 16px; font-weight: 700; letter-spacing: .26em; }
+    .brand a { color: inherit; text-decoration: none; }
+    .brand .unit { color: var(--you); font-weight: 500; font-size: 10px; letter-spacing: .1em; margin-left: 2px; }
     .score { font-size: 12px; letter-spacing: .18em; color: var(--dim); }
-    .score b { font-size: 15px; font-weight: 700; letter-spacing: 0; margin: 0 4px; }
-    .score .sc-you { color: var(--you); }
-    .score .sc-opp { color: var(--srv); }
+    .score b { font-size: 16px; font-weight: 700; letter-spacing: 0; margin: 0 5px; }
+    .score .sc-you { color: var(--you); } .score .sc-opp { color: var(--srv); }
     .score .dash { margin: 0 8px; color: var(--hair); }
     .status { display: flex; align-items: center; gap: 8px; font-size: 10.5px; letter-spacing: .18em; text-transform: uppercase; color: var(--dim); }
     .led { width: 8px; height: 8px; border-radius: 50%; background: var(--dim); }
     .led.on { background: var(--you); animation: pulse 2.2s infinite; }
     @keyframes pulse { 0% { box-shadow: 0 0 0 0 rgba(46,230,192,.45); } 70% { box-shadow: 0 0 0 7px rgba(46,230,192,0); } 100% { box-shadow: 0 0 0 0 rgba(46,230,192,0); } }
-    .status .sep { color: var(--hair); }
 
-    /* ── stage: scope + telemetry ───────────────────────── */
-    .stage { display: grid; grid-template-columns: minmax(0,1fr) 250px; gap: 16px; padding: 16px; }
-    .scope-wrap { position: relative; }
-    canvas {
-      display: block; width: 100%; height: auto; aspect-ratio: 1000 / 600;
-      background: var(--scope); border: 1px solid var(--grid); border-radius: 4px;
-    }
-    .tick { position: absolute; width: 11px; height: 11px; pointer-events: none; }
-    .tick.tl { top: -4px; left: -4px; border-top: 1px solid var(--you); border-left: 1px solid var(--you); }
-    .tick.tr { top: -4px; right: -4px; border-top: 1px solid var(--you); border-right: 1px solid var(--you); }
-    .tick.bl { bottom: -4px; left: -4px; border-bottom: 1px solid var(--you); border-left: 1px solid var(--you); }
-    .tick.br { bottom: -4px; right: -4px; border-bottom: 1px solid var(--you); border-right: 1px solid var(--you); }
-    .overlay {
-      position: absolute; inset: 1px; display: grid; place-content: center; gap: 6px; text-align: center;
-      background: rgba(10,15,20,.62); border-radius: 4px;
-    }
+    /* telemetry card */
+    .panel { top: 56px; right: 16px; width: 188px; padding: 13px 14px;
+      background: rgba(13,20,28,.72); backdrop-filter: blur(6px);
+      border: 1px solid var(--hair); border-radius: 6px; }
+    .panel-h { font-size: 9.5px; letter-spacing: .3em; color: var(--dim); padding-bottom: 8px; margin-bottom: 11px; border-bottom: 1px solid var(--hair); }
+    .readouts { display: flex; flex-direction: column; gap: 12px; }
+    .cell { display: flex; align-items: baseline; justify-content: space-between; }
+    .cell .k { font-size: 9.5px; letter-spacing: .16em; color: var(--dim); }
+    .cell .v i { font-style: normal; font-size: 19px; font-weight: 600; color: var(--ink); }
+    .cell .v em { font-style: normal; font-size: 9.5px; color: var(--dim); margin-left: 3px; }
+    .chan { margin-top: 12px; padding-top: 11px; border-top: 1px solid var(--hair); display: flex; flex-wrap: wrap; gap: 5px 12px; font-size: 10px; color: var(--dim); }
+    .chan b { color: var(--ink); }
+    .legend { margin-top: 12px; padding-top: 11px; border-top: 1px solid var(--hair); display: flex; flex-direction: column; gap: 7px; }
+    .lg { display: flex; align-items: center; gap: 8px; font-size: 10px; color: var(--dim); }
+    .sw { width: 9px; height: 9px; border-radius: 50%; }
+    .sw.you { background: var(--you); } .sw.srv { background: transparent; border: 1.5px solid var(--srv); } .sw.rem { background: var(--rem); }
+
+    /* footer hint */
+    .foot { bottom: 0; left: 0; right: 0; text-align: center; padding: 11px; font-size: 10.5px; color: var(--dim);
+      background: linear-gradient(0deg, rgba(8,12,17,.82), rgba(8,12,17,0)); }
+    .foot code { color: var(--you); }
+
+    /* respawn overlay */
+    .overlay { position: fixed; inset: 0; z-index: 3; display: grid; place-content: center; gap: 6px; text-align: center; background: rgba(10,15,20,.45); }
     .overlay[hidden] { display: none; }
-    .overlay .ok { font-size: 13px; letter-spacing: .35em; color: var(--srv); }
+    .overlay .ok { font-size: 14px; letter-spacing: .35em; color: var(--srv); }
     .overlay .ov { font-size: 11px; letter-spacing: .12em; color: var(--dim); }
 
-    /* ── telemetry panel ────────────────────────────────── */
-    .panel { border: 1px solid var(--hair); border-radius: 5px; background: var(--panel); padding: 12px; }
-    .panel-h { font-size: 9.5px; letter-spacing: .3em; color: var(--dim); padding-bottom: 8px; margin-bottom: 10px; border-bottom: 1px solid var(--hair); }
-    .panel-h + .panel-h { margin-top: 16px; }
-    .readouts { display: grid; grid-template-columns: 1fr; gap: 15px; }
-    .cell { display: flex; flex-direction: column; gap: 3px; }
-    .cell .k { font-size: 9px; letter-spacing: .16em; color: var(--dim); }
-    .cell .v { display: flex; align-items: baseline; gap: 4px; }
-    .cell .v i { font-style: normal; font-size: 21px; font-weight: 600; line-height: 1; color: var(--ink); }
-    .cell .v em { font-style: normal; font-size: 9.5px; color: var(--dim); }
-    .chan { display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: 10.5px; color: var(--dim); }
-    .chan b { color: var(--ink); font-weight: 600; }
-    .legend { display: flex; flex-direction: column; gap: 7px; margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--hair); }
-    .lg { display: flex; align-items: center; gap: 8px; font-size: 10.5px; color: var(--dim); }
-    .sw { width: 9px; height: 9px; border-radius: 50%; }
-    .sw.you { background: var(--you); }
-    .sw.srv { background: transparent; border: 1.5px solid var(--srv); }
-    .sw.rem { background: var(--rem); }
-
-    /* ── footer ─────────────────────────────────────────── */
-    .foot { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap;
-      padding: 11px 18px; border-top: 1px solid var(--hair); font-size: 10.5px; color: var(--dim); letter-spacing: .04em; }
-    .foot code { color: var(--you); background: #0c1118; border: 1px solid var(--hair); border-radius: 3px; padding: 1px 5px; }
-
     :focus-visible { outline: 2px solid var(--you); outline-offset: 2px; }
-
-    @media (max-width: 760px) {
-      .stage { grid-template-columns: 1fr; }
-      .readouts { grid-template-columns: repeat(3, 1fr); }
-      .legend { flex-direction: row; flex-wrap: wrap; gap: 6px 16px; }
-    }
+    @media (max-width: 620px) { .panel { width: 162px; top: 52px; right: 10px; } .score { display: none; } }
     @media (prefers-reduced-motion: reduce) { .led.on { animation: none; } }
   </style>
 </head>
 <body>
-  <div class="instrument">
-    <header class="head">
-      <div class="brand">GONET<span class="unit">/20Hz</span></div>
-      <div class="score">YOU<b class="sc-you" id="sc-you">0</b><span class="dash">—</span>OPP<b class="sc-opp" id="sc-opp">0</b></div>
-      <div class="status"><span class="led" id="led"></span><span id="conn">connecting</span></div>
-    </header>
+  <canvas id="game"></canvas>
 
-    <main class="stage">
-      <div class="scope-wrap">
-        <span class="tick tl"></span><span class="tick tr"></span><span class="tick bl"></span><span class="tick br"></span>
-        <canvas id="game" width="1000" height="600"></canvas>
-        <div class="overlay" id="overlay" hidden>
-          <div class="ok">SIGNAL LOST</div>
-          <div class="ov" id="overlay-sub">reacquiring</div>
-        </div>
-      </div>
+  <header class="hud bar">
+    <div class="brand"><a href="/">GONET</a><span class="unit">/20Hz</span></div>
+    <div class="score">YOU<b class="sc-you" id="sc-you">0</b><span class="dash">—</span>OPP<b class="sc-opp" id="sc-opp">0</b></div>
+    <div class="status"><span class="led" id="led"></span><span id="conn">connecting</span></div>
+  </header>
 
-      <aside class="panel">
-        <div class="panel-h">TELEMETRY</div>
-        <div class="readouts">
-          <div class="cell"><span class="k">RTT</span><span class="v"><i id="t-rtt">—</i><em>ms</em></span></div>
-          <div class="cell"><span class="k">DRIFT</span><span class="v"><i id="t-drift">—</i><em>px</em></span></div>
-          <div class="cell"><span class="k">CORR</span><span class="v"><i id="t-corr">—</i><em>px</em></span></div>
-        </div>
-        <div class="panel-h" id="chan-h" hidden>CHANNEL</div>
-        <div class="chan" id="chan" hidden><span>lag <b id="c-lag">0</b>ms</span><span>jitter <b id="c-jit">0</b>ms</span><span>buf <b id="c-buf">0</b></span></div>
-        <div class="legend">
-          <span class="lg"><i class="sw you"></i>predicted · you</span>
-          <span class="lg"><i class="sw srv"></i>server truth</span>
-          <span class="lg"><i class="sw rem"></i>remote · interpolated</span>
-        </div>
-      </aside>
-    </main>
+  <aside class="hud panel">
+    <div class="panel-h">TELEMETRY</div>
+    <div class="readouts">
+      <div class="cell"><span class="k">RTT</span><span class="v"><i id="t-rtt">—</i><em>ms</em></span></div>
+      <div class="cell"><span class="k">DRIFT</span><span class="v"><i id="t-drift">—</i><em>px</em></span></div>
+      <div class="cell"><span class="k">CORR</span><span class="v"><i id="t-corr">—</i><em>px</em></span></div>
+    </div>
+    <div class="chan" id="chan" hidden><span>lag <b id="c-lag">0</b>ms</span><span>jitter <b id="c-jit">0</b>ms</span><span>buf <b id="c-buf">0</b></span></div>
+    <div class="legend">
+      <span class="lg"><i class="sw you"></i>predicted · you</span>
+      <span class="lg"><i class="sw srv"></i>server truth</span>
+      <span class="lg"><i class="sw rem"></i>remote · interpolated</span>
+    </div>
+  </aside>
 
-    <footer class="foot">
-      <span>arrow keys to move · charge into your opponent to drain them</span>
-      <span>append <code>?lag=200</code> or <code>?jitter=100</code> to watch the netcode work</span>
-    </footer>
+  <div class="hud foot">arrow keys to move · charge into your opponent to drain them · append <code>?lag=200</code> to feel the netcode</div>
+
+  <div class="overlay" id="overlay" hidden>
+    <div class="ok">SIGNAL LOST</div>
+    <div class="ov" id="overlay-sub">reacquiring</div>
   </div>
 
   <script type="module">
@@ -159,7 +115,16 @@
 
     const canvas = document.getElementById("game");
     const ctx = canvas.getContext("2d");
-    const W = canvas.width, H = canvas.height;
+    let SCALE = 1; // world px -> screen px, set each frame to fit the viewport
+
+    function resize() {
+      const dpr = Math.min(window.devicePixelRatio || 1, 2);
+      canvas.width = Math.round(canvas.clientWidth * dpr);
+      canvas.height = Math.round(canvas.clientHeight * dpr);
+    }
+    window.addEventListener("resize", resize);
+    resize();
+
     const $ = (id) => document.getElementById(id);
     const ui = {
       scYou: $("sc-you"), scOpp: $("sc-opp"), conn: $("conn"), led: $("led"),
@@ -168,7 +133,7 @@
     };
     $("c-lag").textContent = LAG_MS;
     $("c-jit").textContent = JITTER_MS;
-    if (LAG_MS || JITTER_MS) { $("chan").hidden = false; $("chan-h").hidden = false; }
+    if (LAG_MS || JITTER_MS) { $("chan").hidden = false; }
 
     let myId = null;            // our own player id, learned from the welcome message
     let localState = null;      // predicted position of our player
@@ -282,30 +247,34 @@
     }
 
     function signal(x, y, r, color) {
-      ctx.save();
-      ctx.shadowColor = color; ctx.shadowBlur = 10;
-      ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2);
-      ctx.fillStyle = color; ctx.fill();
-      ctx.restore();
+      ctx.save(); ctx.shadowColor = color; ctx.shadowBlur = 10;
+      ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fillStyle = color; ctx.fill(); ctx.restore();
     }
     function ring(x, y, r, color) {
-      ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2);
-      ctx.lineWidth = 1.5; ctx.strokeStyle = color; ctx.stroke();
+      ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.lineWidth = 1.5 / SCALE; ctx.strokeStyle = color; ctx.stroke();
     }
 
     function graticule() {
-      ctx.fillStyle = COL.scope; ctx.fillRect(0, 0, W, H);
-      ctx.lineWidth = 1; ctx.strokeStyle = COL.grid; ctx.beginPath();
-      for (let x = 100; x < W; x += 100) { ctx.moveTo(x + 0.5, 0); ctx.lineTo(x + 0.5, H); }
-      for (let y = 100; y < H; y += 100) { ctx.moveTo(0, y + 0.5); ctx.lineTo(W, y + 0.5); }
+      ctx.lineWidth = 1 / SCALE; ctx.strokeStyle = COL.grid; ctx.beginPath();
+      for (let x = 100; x < ARENA_W; x += 100) { ctx.moveTo(x, 0); ctx.lineTo(x, ARENA_H); }
+      for (let y = 100; y < ARENA_H; y += 100) { ctx.moveTo(0, y); ctx.lineTo(ARENA_W, y); }
       ctx.stroke();
       ctx.strokeStyle = COL.gridMaj; ctx.beginPath();
-      ctx.moveTo(W / 2 + 0.5, 0); ctx.lineTo(W / 2 + 0.5, H);
-      ctx.moveTo(0, H / 2 + 0.5); ctx.lineTo(W, H / 2 + 0.5);
+      ctx.moveTo(ARENA_W / 2, 0); ctx.lineTo(ARENA_W / 2, ARENA_H);
+      ctx.moveTo(0, ARENA_H / 2); ctx.lineTo(ARENA_W, ARENA_H / 2);
       ctx.stroke();
+      ctx.strokeStyle = COL.gridMaj; ctx.lineWidth = 1.5 / SCALE; ctx.strokeRect(0, 0, ARENA_W, ARENA_H);
     }
 
     function draw() {
+      const cw = canvas.width, ch = canvas.height;
+      SCALE = Math.min(cw / ARENA_W, ch / ARENA_H);
+      const ox = (cw - ARENA_W * SCALE) / 2, oy = (ch - ARENA_H * SCALE) / 2;
+
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.fillStyle = COL.scope; ctx.fillRect(0, 0, cw, ch);
+      ctx.setTransform(SCALE, 0, 0, SCALE, ox, oy); // enter world space
+
       graticule();
       const renderTime = performance.now() - INTERP_DELAY;
 
@@ -313,7 +282,7 @@
       for (const id in world) {
         if (id === myId) continue;
         const p = world[id];
-        if (!p.r) continue; // dead / respawning
+        if (!p.r) continue;
         const buf = history[id];
         if (!buf || buf.length === 0) continue;
         bufDepth = buf.length;
@@ -327,17 +296,18 @@
         if (localState) {
           const d = Math.hypot(localState.x - me.x, localState.y - me.y);
           drift = d.toFixed(1);
-          if (d > 1.2) { // the error vector — prediction drift, drawn as a measured trace
+          if (d > 1.2) {
             ctx.save();
-            ctx.strokeStyle = COL.dim; ctx.lineWidth = 1; ctx.setLineDash([4, 4]);
+            ctx.strokeStyle = COL.dim; ctx.lineWidth = 1 / SCALE; ctx.setLineDash([4 / SCALE, 4 / SCALE]);
             ctx.beginPath(); ctx.moveTo(localState.x, localState.y); ctx.lineTo(me.x, me.y); ctx.stroke();
             ctx.restore();
           }
         }
-        ring(me.x, me.y, me.r, COL.srv);                              // server truth (ghost)
-        if (localState) signal(localState.x, localState.y, me.r, COL.you); // predicted (you)
+        ring(me.x, me.y, me.r, COL.srv);
+        if (localState) signal(localState.x, localState.y, me.r, COL.you);
       }
 
+      ctx.setTransform(1, 0, 0, 1, 0, 0); // back to screen space for any future overlays
       updateUI(me, drift, bufDepth);
       requestAnimationFrame(draw);
     }

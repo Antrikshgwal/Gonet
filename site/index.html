@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>GONET — real-time multiplayer netcode</title>
+  <meta name="description" content="A 2-player real-time game in Go with client-side prediction, server reconciliation, and entity interpolation." />
+  <style>
+    :root {
+      --scope: #0A0F14; --grid: #1C2A35; --hair: #223040;
+      --ink: #C9D6DF; --dim: #5E7385;
+      --you: #2EE6C0; --srv: #FFB454;
+      --mono: ui-monospace, "JetBrains Mono", "SF Mono", "Cascadia Code", Menlo, Consolas, monospace;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; min-height: 100vh; background: var(--scope); color: var(--ink);
+      font-family: var(--mono); font-variant-numeric: tabular-nums;
+      -webkit-font-smoothing: antialiased;
+      display: flex; flex-direction: column;
+    }
+    a { color: inherit; }
+    :focus-visible { outline: 2px solid var(--you); outline-offset: 3px; }
+
+    .page { width: 100%; max-width: 940px; margin: 0 auto; padding: 22px 24px 28px;
+      flex: 1; display: flex; flex-direction: column; }
+
+    header { display: flex; align-items: center; justify-content: space-between; }
+    .mark { display: flex; align-items: center; gap: 9px; font-weight: 700; letter-spacing: .26em; font-size: 15px; }
+    .mark .on { width: 7px; height: 7px; border-radius: 50%; background: var(--you); box-shadow: 0 0 8px var(--you); }
+    .src { font-size: 12px; letter-spacing: .08em; color: var(--dim); text-decoration: none; }
+    .src:hover { color: var(--ink); }
+
+    main { flex: 1; display: flex; flex-direction: column; justify-content: center; gap: 30px; padding: 24px 0; }
+
+    .scope { position: relative; }
+    .scope canvas { display: block; width: 100%; height: auto; aspect-ratio: 1100 / 360;
+      background: var(--scope); border: 1px solid var(--grid); border-radius: 6px; }
+    .scope .ch { position: absolute; top: 9px; left: 12px; font-size: 9.5px; letter-spacing: .22em; color: var(--dim); }
+    .scope .ch b { color: var(--you); font-weight: 400; }
+    .scope .ch i { color: var(--srv); font-style: normal; }
+    .tick { position: absolute; width: 11px; height: 11px; }
+    .tick.tl { top: -4px; left: -4px; border-top: 1px solid var(--you); border-left: 1px solid var(--you); }
+    .tick.tr { top: -4px; right: -4px; border-top: 1px solid var(--you); border-right: 1px solid var(--you); }
+    .tick.bl { bottom: -4px; left: -4px; border-bottom: 1px solid var(--you); border-left: 1px solid var(--you); }
+    .tick.br { bottom: -4px; right: -4px; border-bottom: 1px solid var(--you); border-right: 1px solid var(--you); }
+
+    h1 { font-size: clamp(24px, 4.2vw, 33px); font-weight: 700; letter-spacing: -.01em; line-height: 1.12; margin: 0; }
+    .lede p { margin: 12px 0 0; color: var(--dim); font-size: 15px; }
+    .row { display: flex; align-items: center; gap: 22px; flex-wrap: wrap; margin-top: 26px; }
+    .play { text-decoration: none; background: var(--you); color: #06120f; font-weight: 700; letter-spacing: .04em;
+      padding: 11px 22px; border-radius: 5px; font-size: 14px; }
+    .play:hover { background: #5cf0d6; }
+    .legend { font-size: 12px; color: var(--dim); }
+    .sw { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin: 0 6px 0 2px; vertical-align: 1px; }
+    .sw.you { background: var(--you); }
+    .sw.srv { background: transparent; border: 1.5px solid var(--srv); }
+
+    footer { font-size: 11.5px; color: var(--dim); letter-spacing: .04em; }
+
+    @media (max-width: 620px) { .row { gap: 14px; } }
+  </style>
+</head>
+<body>
+  <div class="page">
+    <header>
+      <div class="mark"><span class="on"></span>GONET</div>
+      <a class="src" href="https://github.com/Antrikshgwal/gonet">source ↗</a>
+    </header>
+
+    <main>
+      <div class="scope">
+        <span class="tick tl"></span><span class="tick tr"></span><span class="tick bl"></span><span class="tick br"></span>
+        <div class="ch">CH1 <b>PREDICTION</b> · CH2 <i>SERVER</i></div>
+        <canvas id="demo" width="1100" height="360"></canvas>
+      </div>
+
+      <div class="lede">
+        <h1>Real-time multiplayer netcode in Go.</h1>
+
+        <div class="row">
+          <a class="play" href="/play">play →</a>
+
+        </div>
+      </div>
+    </main>
+
+
+  </div>
+
+  <script>
+    // The proof, not a pitch: a target wanders; the teal marker sits on where it
+    // is now (predicted, instant), the amber ring trails ~200ms behind (server
+    // truth). The dashed gap is the latency prediction hides. No backend.
+    (function () {
+      const cv = document.getElementById("demo");
+      const ctx = cv.getContext("2d");
+      const W = cv.width, H = cv.height;
+      const COL = { scope: "#0A0F14", grid: "#152029", maj: "#1C2A35", you: "#2EE6C0", srv: "#FFB454", dim: "#5E7385" };
+      const reduce = matchMedia("(prefers-reduced-motion: reduce)").matches;
+      const LAG = 0.2;
+      const trail = [];
+
+      const path = (t) => ({
+        x: W * (0.5 + 0.40 * Math.sin(t * 0.9)),
+        y: H * (0.5 + 0.32 * Math.sin(t * 1.7 + 1)),
+      });
+
+      function grid() {
+        ctx.fillStyle = COL.scope; ctx.fillRect(0, 0, W, H);
+        ctx.lineWidth = 1; ctx.strokeStyle = COL.grid; ctx.beginPath();
+        for (let x = 100; x < W; x += 100) { ctx.moveTo(x + .5, 0); ctx.lineTo(x + .5, H); }
+        for (let y = 90; y < H; y += 90) { ctx.moveTo(0, y + .5); ctx.lineTo(W, y + .5); }
+        ctx.stroke();
+        ctx.strokeStyle = COL.maj; ctx.beginPath();
+        ctx.moveTo(0, H / 2 + .5); ctx.lineTo(W, H / 2 + .5); ctx.stroke();
+      }
+      function render(t) {
+        const cur = path(t);
+        trail.push({ t, x: cur.x, y: cur.y });
+        while (trail.length > 240) trail.shift();
+        let srv = cur;
+        for (let i = trail.length - 1; i >= 0; i--) { if (trail[i].t <= t - LAG) { srv = trail[i]; break; } }
+
+        grid();
+        ctx.save(); ctx.strokeStyle = COL.dim; ctx.lineWidth = 1; ctx.setLineDash([4, 4]);
+        ctx.beginPath(); ctx.moveTo(cur.x, cur.y); ctx.lineTo(srv.x, srv.y); ctx.stroke(); ctx.restore();
+        ctx.beginPath(); ctx.arc(srv.x, srv.y, 10, 0, Math.PI * 2); ctx.lineWidth = 1.5; ctx.strokeStyle = COL.srv; ctx.stroke();
+        ctx.save(); ctx.shadowColor = COL.you; ctx.shadowBlur = 14;
+        ctx.beginPath(); ctx.arc(cur.x, cur.y, 10, 0, Math.PI * 2); ctx.fillStyle = COL.you; ctx.fill(); ctx.restore();
+      }
+
+      if (reduce) { render(0.6); return; }
+      const start = performance.now();
+      (function loop(now) { render((now - start) / 1000); requestAnimationFrame(loop); })(start);
+    })();
+  </script>
+</body>
+</html>

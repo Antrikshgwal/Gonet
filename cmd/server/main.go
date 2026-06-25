@@ -26,7 +26,7 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ws", serveWS(h))
 
-	
+
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("ok"))
@@ -44,7 +44,13 @@ func main() {
 	if err != nil {
 		log.Fatalf("failed to open embedded client FS: %v", err)
 	}
-	mux.Handle("/", http.FileServer(http.FS(clientFS)))
+	mux.Handle("/play/", http.StripPrefix("/play/", http.FileServer(http.FS(clientFS))))
+
+	siteFS, err := fs.Sub(gonet.SiteFS, "site")
+	if err != nil {
+		log.Fatalf("failed to open embedded site FS: %v", err)
+	}
+	mux.Handle("/", http.FileServer(http.FS(siteFS)))
 
 	addr := os.Getenv("ADDR")
 	if addr == "" {
