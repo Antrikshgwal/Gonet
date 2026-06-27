@@ -64,7 +64,7 @@ the wire; the client merges each delta onto a persistent world map. The welcome
 message tells a client which entity is *itself*, so it can predict and reconcile
 that one.
 
-## The six-stage pipeline — one keypress, end to end
+## Whole keypress pipeline
 
 ![alt text](image-1.png)
 
