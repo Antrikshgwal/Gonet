@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"io/fs"
 	"log"
+	"math/rand"
 	"net"
 	"net/http"
 	_ "net/http/pprof" // registers /debug/pprof handlers on the default mux
@@ -30,17 +31,20 @@ func main() {
 	// pprof on a separate localhost port for profiling under load.
 	go func() { log.Println(http.ListenAndServe("localhost:6060", nil)) }()
 
-	h := hub.New()
+	// Two isolated arenas: real players never share a hub with bots, so nobody
+	// can inject bots into someone's PvP match. Practice is populated by the
+	// server (see populatePractice); the client opts in with ?mode=practice.
+	pvp := hub.New()
+	practice := hub.New()
 
-	// MAX_PLAYERS caps concurrent connections so the O(n²) single arena can't be
-	// driven into the ground (default 200).
+	// MAX_PLAYERS caps each arena so the O(n²) hub can't be driven into the ground.
 	if n, err := strconv.Atoi(os.Getenv("MAX_PLAYERS")); err == nil {
-		h.SetMaxPlayers(n)
+		pvp.SetMaxPlayers(n)
+		practice.SetMaxPlayers(n)
 	}
 
+	// RECORD captures (state, action) pairs — from real PvP play, not the bots.
 	if path := os.Getenv("RECORD"); path != "" {
-		// Append so recordings accumulate across sessions instead of being
-		// truncated each run.
 		f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 		if err != nil {
 			log.Fatalf("open record file: %v", err)
@@ -52,7 +56,7 @@ func main() {
 				enc.Encode(s)
 			}
 		}()
-		h.Record(func(s hub.Sample) {
+		pvp.Record(func(s hub.Sample) {
 			select {
 			case ch <- s:
 			default:
@@ -61,55 +65,34 @@ func main() {
 		log.Printf("recording samples to %s", path)
 	}
 
-	go h.Run()
+	go pvp.Run()
+	go practice.Run()
 
 	addr := os.Getenv("ADDR")
 	if addr == "" {
 		addr = ":8080"
 	}
+	_, port, _ := net.SplitHostPort(addr)
+	if port == "" {
+		port = "8080"
+	}
+
+	// Keep the practice arena alive with a shifting population of bots.
+	go populatePractice("ws://127.0.0.1:"+port+"/ws?mode=practice", bot.LoadMLP(gonet.BotModel))
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/ws", serveWS(h))
+	mux.HandleFunc("/ws", serveWS(pvp, practice))
 
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("ok"))
 	})
 
-	// Lobby: a JSON view of who's connected. Control-plane endpoint for tools
-	// and humans, so it's plain HTTP/JSON rather than the binary WS protocol.
+	// Lobby: a JSON view of who's in the PvP arena. Control-plane endpoint, so
+	// it's plain HTTP/JSON rather than the binary WS protocol.
 	mux.HandleFunc("/lobby", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(h.Lobby())
-	})
-
-	// /bot spawns an in-process bot that dials our own /ws — the same way a
-	// browser connects — so the deployed "play vs bot" button needs no shell.
-	// Defaults to the embedded MLP, capped so it can't be spammed.
-	botModel := bot.LoadMLP(gonet.BotModel)
-	_, port, _ := net.SplitHostPort(addr)
-	if port == "" {
-		port = "8080"
-	}
-	wsURL := "ws://127.0.0.1:" + port + "/ws"
-	var activeBots atomic.Int64
-	const maxBots = 4
-	mux.HandleFunc("/bot", func(w http.ResponseWriter, r *http.Request) {
-		if activeBots.Add(1) > maxBots {
-			activeBots.Add(-1)
-			http.Error(w, "too many bots", http.StatusTooManyRequests)
-			return
-		}
-		go func() {
-			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
-			defer cancel()
-			defer activeBots.Add(-1)
-			if err := bot.Play(ctx, wsURL, botModel); err != nil {
-				log.Printf("bot: %v", err)
-			}
-		}()
-		w.WriteHeader(http.StatusAccepted)
-		w.Write([]byte("bot joining"))
+		json.NewEncoder(w).Encode(pvp.Lobby())
 	})
 
 	clientFS, err := fs.Sub(gonet.ClientFS, "client")
@@ -130,8 +113,48 @@ func main() {
 	}
 }
 
-func serveWS(h *hub.Hub) http.HandlerFunc {
+// populatePractice maintains a shifting population of bots in the practice arena
+// so it feels like a live lobby: they spawn on random timers, each with a random
+// skill and a random lifetime, and a mix of the MLP and the heuristic.
+func populatePractice(wsURL string, model *bot.MLP) {
+	var live atomic.Int64
+	const target = 5
+	spawn := func() {
+		if live.Add(1) > target {
+			live.Add(-1)
+			return
+		}
+		m := model
+		if rand.Float64() < 0.5 {
+			m = nil // mix in heuristic-only bots for variety
+		}
+		aggro := 0.3 + rand.Float64()*0.6
+		life := time.Duration(20+rand.Intn(70)) * time.Second
+		go func() {
+			defer live.Add(-1)
+			ctx, cancel := context.WithTimeout(context.Background(), life)
+			defer cancel()
+			bot.Play(ctx, wsURL, m, aggro)
+		}()
+	}
+	time.Sleep(time.Second) // let the HTTP server come up before bots dial it
+	for range 3 {           // seed so a visitor lands in a populated arena
+		spawn()
+	}
+	for {
+		time.Sleep(time.Duration(2000+rand.Intn(4000)) * time.Millisecond)
+		spawn()
+	}
+}
+
+// serveWS routes a connection to the PvP arena, or the practice arena when the
+// client asks for ?mode=practice.
+func serveWS(pvp, practice *hub.Hub) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		h := pvp
+		if r.URL.Query().Get("mode") == "practice" {
+			h = practice
+		}
 		conn, err := upgrader.Upgrade(w, r, nil)
 		if err != nil {
 			log.Printf("Failed to upgrade connection: %v", err)
@@ -147,16 +170,12 @@ func serveWS(h *hub.Hub) http.HandlerFunc {
 		for {
 			_, message, err := conn.ReadMessage()
 			if err != nil {
-				log.Printf("Read error: %v", err)
 				break
 			}
-
 			var in hub.InputMsg
 			if err := msgpack.Unmarshal(message, &in); err != nil {
-				log.Printf("Bad input message: %v", err)
 				continue
 			}
-
 			h.SendInput(conn, in)
 		}
 	}

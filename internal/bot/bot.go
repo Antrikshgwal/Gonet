@@ -68,8 +68,9 @@ func axis(v float64) int8 {
 }
 
 // Play connects to wsURL and plays until ctx is cancelled or the connection
-// drops. model may be nil (then it uses the chase heuristic).
-func Play(ctx context.Context, wsURL string, model *MLP) error {
+// drops. model may be nil (then it uses the chase heuristic). aggro in [0,1]
+// tunes skill: low = passive/mills around, high = relentless (but still beatable).
+func Play(ctx context.Context, wsURL string, model *MLP, aggro float64) error {
 	c, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
 	if err != nil {
 		return err
@@ -137,21 +138,16 @@ func Play(ctx context.Context, wsURL string, model *MLP) error {
 			mu.Lock()
 			var dx, dy int8
 			self := world[myID]
-			var opp *hub.PlayerState
-			for id, p := range world {
-				if id != myID {
-					opp = p
-				}
-			}
+			opp := nearest(world, myID, self)
 			if self != nil && opp != nil && self.RespawnAt == 0 && self.R > 0 {
 				if model != nil {
 					f := hub.Features(*self, *opp)
 					dx, dy = model.forward(f[:])
 					if dx == 0 && dy == 0 { // model unsure → don't freeze, fall back
-						dx, dy = decide(self, opp, t)
+						dx, dy = decide(self, opp, t, aggro)
 					}
 				} else {
-					dx, dy = decide(self, opp, t)
+					dx, dy = decide(self, opp, t, aggro)
 				}
 			}
 			tick := lastTick
@@ -166,14 +162,35 @@ func Play(ctx context.Context, wsURL string, model *MLP) error {
 	}
 }
 
+// nearest returns the closest live opponent — targeting an *arbitrary* other
+// player makes the bot jitter between targets in a crowd (looks broken).
+func nearest(world map[string]*hub.PlayerState, myID string, self *hub.PlayerState) *hub.PlayerState {
+	if self == nil {
+		return nil
+	}
+	var opp *hub.PlayerState
+	best := math.MaxFloat64
+	for id, p := range world {
+		if id == myID || p.R == 0 {
+			continue
+		}
+		d := (p.X-self.X)*(p.X-self.X) + (p.Y-self.Y)*(p.Y-self.Y)
+		if d < best {
+			best, opp = d, p
+		}
+	}
+	return opp
+}
+
 // decide is a beatable heuristic: the bot reacts every tick (superhuman), so it
-// eases off rhythmically to give a human openings and retreats when outmatched.
-func decide(self, opp *hub.PlayerState, t float64) (int8, int8) {
-	dx, dy := opp.X-self.X, opp.Y-self.Y
-	if math.Sin(t*1.6) < -0.25 {
+// eases off in a rhythm to give a human openings, and retreats when outmatched.
+// aggro (0..1) sets how much it idles — low bots mill around, high bots press.
+func decide(self, opp *hub.PlayerState, t, aggro float64) (int8, int8) {
+	if math.Sin(t*1.6+aggro*9) < 0.5-1.1*aggro { // ease off; passive bots idle more
 		return 0, 0
 	}
-	if self.R+3 < opp.R {
+	dx, dy := opp.X-self.X, opp.Y-self.Y
+	if self.R+4 < opp.R { // outmatched → back off, don't feed radius
 		return sign(-dx, 6), sign(-dy, 6)
 	}
 	return sign(dx, 6), sign(dy, 6)

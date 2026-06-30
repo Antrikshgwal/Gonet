@@ -17,6 +17,7 @@ import (
 func main() {
 	addr := flag.String("addr", "ws://127.0.0.1:8080/ws", "server websocket URL")
 	modelPath := flag.String("model", "", "model JSON path; empty = embedded default; 'none' = heuristic")
+	aggro := flag.Float64("aggro", 0.7, "skill 0..1: low = passive, high = relentless")
 	flag.Parse()
 
 	var model *bot.MLP
@@ -42,7 +43,7 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
-	if err := bot.Play(ctx, *addr, model); err != nil {
+	if err := bot.Play(ctx, *addr, model, *aggro); err != nil {
 		log.Printf("bot exited: %v", err)
 	}
 }

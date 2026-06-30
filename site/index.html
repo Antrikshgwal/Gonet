@@ -51,6 +51,8 @@
     .play { text-decoration: none; background: var(--you); color: #06120f; font-weight: 700; letter-spacing: .04em;
       padding: 11px 22px; border-radius: 5px; font-size: 14px; }
     .play:hover { background: #5cf0d6; }
+    .play.alt { background: transparent; color: var(--you); border: 1px solid var(--you); }
+    .play.alt:hover { background: rgba(46, 230, 192, .12); }
     .legend { font-size: 12px; color: var(--dim); }
     .sw { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin: 0 6px 0 2px; vertical-align: 1px; }
     .sw.you { background: var(--you); }
@@ -80,7 +82,7 @@
 
         <div class="row">
           <a class="play" href="/play">play →</a>
-
+          <a class="play alt" href="/play?mode=practice">practice vs bots →</a>
         </div>
       </div>
     </main>

@@ -61,13 +61,6 @@
     .overlay .ok { font-size: 14px; letter-spacing: .35em; color: var(--srv); }
     .overlay .ov { font-size: 11px; letter-spacing: .12em; color: var(--dim); }
 
-    .right { display: flex; align-items: center; gap: 14px; }
-    .botbtn { font-family: inherit; font-size: 11px; letter-spacing: .12em; text-transform: uppercase;
-      color: var(--you); background: transparent; border: 1px solid var(--you); border-radius: 5px;
-      padding: 6px 12px; cursor: pointer; transition: background .15s; }
-    .botbtn:hover { background: rgba(46, 230, 192, .12); }
-    .botbtn:disabled { opacity: .5; cursor: default; }
-
     :focus-visible { outline: 2px solid var(--you); outline-offset: 2px; }
     @media (max-width: 620px) { .panel { width: 162px; top: 52px; right: 10px; } .score { display: none; } }
     @media (prefers-reduced-motion: reduce) { .led.on { animation: none; } }
@@ -79,10 +72,7 @@
   <header class="hud bar">
     <div class="brand"><a href="/">GONET</a><span class="unit"></span></div>
     <div class="score">YOU<b class="sc-you" id="sc-you">0</b><span class="dash">—</span>OPP<b class="sc-opp" id="sc-opp">0</b></div>
-    <div class="right">
-      <button id="addbot" class="botbtn" title="Spawn an AI opponent (behavior-cloning MLP)">+ play vs bot</button>
-      <div class="status"><span class="led" id="led"></span><span id="conn">connecting</span></div>
-    </div>
+    <div class="status"><span class="led" id="led"></span><span id="conn">connecting</span></div>
   </header>
 
   <aside class="hud panel">
@@ -157,7 +147,10 @@
     const world = {};           // id -> authoritative player state from snapshots
     const history = {};         // id -> [{t, x, y, vx, vy}] samples for interpolation
 
-    const ws = new WebSocket(`ws://${location.host}/ws`);
+    // wss on HTTPS (deploy), ws on localhost; ?mode=practice joins the bot arena.
+    const proto = location.protocol === "https:" ? "wss" : "ws";
+    const mode = params.get("mode") === "practice" ? "?mode=practice" : "";
+    const ws = new WebSocket(`${proto}://${location.host}/ws${mode}`);
     ws.binaryType = "arraybuffer";
     ws.onopen = () => { ui.conn.textContent = "live"; ui.led.classList.add("on"); };
     ws.onclose = () => { ui.conn.textContent = "offline"; ui.led.classList.remove("on"); };
@@ -349,21 +342,6 @@
     }
 
     requestAnimationFrame(draw);
-
-    // Spawn a server-side AI opponent (it dials /ws like any other client).
-    const addbot = document.getElementById("addbot");
-    addbot.onclick = async () => {
-      addbot.disabled = true;
-      const label = addbot.textContent;
-      addbot.textContent = "spawning…";
-      try {
-        const res = await fetch("/bot", { method: "POST" });
-        addbot.textContent = res.ok ? "bot joined" : "arena full";
-      } catch {
-        addbot.textContent = "error";
-      }
-      setTimeout(() => { addbot.textContent = label; addbot.disabled = false; }, 2500);
-    };
 
     window.addEventListener("keydown", (e) => {
       const dir = keyMap[e.key];
