@@ -28,7 +28,6 @@ var upgrader = websocket.Upgrader{
 }
 
 func main() {
-	// pprof on a separate localhost port for profiling under load.
 	go func() { log.Println(http.ListenAndServe("localhost:6060", nil)) }()
 
 	// Two isolated arenas: real players never share a hub with bots, so nobody
@@ -70,18 +69,24 @@ func main() {
 
 	addr := os.Getenv("ADDR")
 	if addr == "" {
-		addr = ":8080"
+		if p := os.Getenv("PORT"); p != "" {
+			addr = ":" + p
+		} else {
+			addr = ":8080"
+		}
 	}
 	_, port, _ := net.SplitHostPort(addr)
 	if port == "" {
 		port = "8080"
 	}
 
-	// Keep the practice arena alive with a shifting population of bots.
-	go populatePractice("ws://127.0.0.1:"+port+"/ws?mode=practice", bot.LoadMLP(gonet.BotModel))
+	// Populate the practice arena with bots — but only while a human is in it,
+	// so an idle deploy doesn't burn resources playing bots against nobody.
+	var practiceHumans atomic.Int64
+	go populatePractice("ws://127.0.0.1:"+port+"/ws?mode=practice&bot=1", bot.LoadMLP(gonet.BotModel), &practiceHumans)
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/ws", serveWS(pvp, practice))
+	mux.HandleFunc("/ws", serveWS(pvp, practice, &practiceHumans))
 
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -113,16 +118,13 @@ func main() {
 	}
 }
 
-// populatePractice maintains a shifting population of bots in the practice arena
-// so it feels like a live lobby: they spawn on random timers, each with a random
-// skill and a random lifetime, and a mix of the MLP and the heuristic.
-func populatePractice(wsURL string, model *bot.MLP) {
+func populatePractice(wsURL string, model *bot.MLP, humans *atomic.Int64) {
 	var live atomic.Int64
 	const target = 5
-	spawn := func() {
-		if live.Add(1) > target {
-			live.Add(-1)
-			return
+	for {
+		time.Sleep(time.Duration(900+rand.Intn(1100)) * time.Millisecond)
+		if humans.Load() == 0 || live.Load() >= target {
+			continue // nobody to play, or arena already full
 		}
 		m := model
 		if rand.Float64() < 0.5 {
@@ -130,6 +132,7 @@ func populatePractice(wsURL string, model *bot.MLP) {
 		}
 		aggro := 0.3 + rand.Float64()*0.6
 		life := time.Duration(20+rand.Intn(70)) * time.Second
+		live.Add(1)
 		go func() {
 			defer live.Add(-1)
 			ctx, cancel := context.WithTimeout(context.Background(), life)
@@ -137,22 +140,15 @@ func populatePractice(wsURL string, model *bot.MLP) {
 			bot.Play(ctx, wsURL, m, aggro)
 		}()
 	}
-	time.Sleep(time.Second) // let the HTTP server come up before bots dial it
-	for range 3 {           // seed so a visitor lands in a populated arena
-		spawn()
-	}
-	for {
-		time.Sleep(time.Duration(2000+rand.Intn(4000)) * time.Millisecond)
-		spawn()
-	}
 }
 
 // serveWS routes a connection to the PvP arena, or the practice arena when the
 // client asks for ?mode=practice.
-func serveWS(pvp, practice *hub.Hub) http.HandlerFunc {
+func serveWS(pvp, practice *hub.Hub, practiceHumans *atomic.Int64) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		practiceMode := r.URL.Query().Get("mode") == "practice"
 		h := pvp
-		if r.URL.Query().Get("mode") == "practice" {
+		if practiceMode {
 			h = practice
 		}
 		conn, err := upgrader.Upgrade(w, r, nil)
@@ -166,6 +162,13 @@ func serveWS(pvp, practice *hub.Hub) http.HandlerFunc {
 			return
 		}
 		defer h.Unregister(conn)
+
+		// Count real humans in practice (not the bots, which carry ?bot=1) so the
+		// population manager only spawns when someone's there to play.
+		if practiceMode && r.URL.Query().Get("bot") != "1" {
+			practiceHumans.Add(1)
+			defer practiceHumans.Add(-1)
+		}
 
 		for {
 			_, message, err := conn.ReadMessage()
