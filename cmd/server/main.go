@@ -1,15 +1,20 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"io/fs"
 	"log"
+	"net"
 	"net/http"
 	_ "net/http/pprof" // registers /debug/pprof handlers on the default mux
 	"os"
 	"strconv"
+	"sync/atomic"
+	"time"
 
 	gonet "github.com/Antrikshgwal/gonet"
+	"github.com/Antrikshgwal/gonet/internal/bot"
 	"github.com/Antrikshgwal/gonet/internal/hub"
 	"github.com/gorilla/websocket"
 	"github.com/vmihailenco/msgpack/v5"
@@ -58,6 +63,11 @@ func main() {
 
 	go h.Run()
 
+	addr := os.Getenv("ADDR")
+	if addr == "" {
+		addr = ":8080"
+	}
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ws", serveWS(h))
 
@@ -73,6 +83,35 @@ func main() {
 		json.NewEncoder(w).Encode(h.Lobby())
 	})
 
+	// /bot spawns an in-process bot that dials our own /ws — the same way a
+	// browser connects — so the deployed "play vs bot" button needs no shell.
+	// Defaults to the embedded MLP, capped so it can't be spammed.
+	botModel := bot.LoadMLP(gonet.BotModel)
+	_, port, _ := net.SplitHostPort(addr)
+	if port == "" {
+		port = "8080"
+	}
+	wsURL := "ws://127.0.0.1:" + port + "/ws"
+	var activeBots atomic.Int64
+	const maxBots = 4
+	mux.HandleFunc("/bot", func(w http.ResponseWriter, r *http.Request) {
+		if activeBots.Add(1) > maxBots {
+			activeBots.Add(-1)
+			http.Error(w, "too many bots", http.StatusTooManyRequests)
+			return
+		}
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+			defer cancel()
+			defer activeBots.Add(-1)
+			if err := bot.Play(ctx, wsURL, botModel); err != nil {
+				log.Printf("bot: %v", err)
+			}
+		}()
+		w.WriteHeader(http.StatusAccepted)
+		w.Write([]byte("bot joining"))
+	})
+
 	clientFS, err := fs.Sub(gonet.ClientFS, "client")
 	if err != nil {
 		log.Fatalf("failed to open embedded client FS: %v", err)
@@ -85,10 +124,6 @@ func main() {
 	}
 	mux.Handle("/", http.FileServer(http.FS(siteFS)))
 
-	addr := os.Getenv("ADDR")
-	if addr == "" {
-		addr = ":8080"
-	}
 	log.Printf("server listening on %s (ws at /ws, static embedded)", addr)
 	if err := http.ListenAndServe(addr, mux); err != nil {
 		log.Fatalf("server failed: %v", err)
