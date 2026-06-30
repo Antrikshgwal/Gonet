@@ -7,6 +7,7 @@ import (
 	"net/http"
 	_ "net/http/pprof" // registers /debug/pprof handlers on the default mux
 	"os"
+	"strconv"
 
 	gonet "github.com/Antrikshgwal/gonet"
 	"github.com/Antrikshgwal/gonet/internal/hub"
@@ -25,6 +26,12 @@ func main() {
 	go func() { log.Println(http.ListenAndServe("localhost:6060", nil)) }()
 
 	h := hub.New()
+
+	// MAX_PLAYERS caps concurrent connections so the O(n²) single arena can't be
+	// driven into the ground (default 200).
+	if n, err := strconv.Atoi(os.Getenv("MAX_PLAYERS")); err == nil {
+		h.SetMaxPlayers(n)
+	}
 
 	if path := os.Getenv("RECORD"); path != "" {
 		// Append so recordings accumulate across sessions instead of being
@@ -95,7 +102,11 @@ func serveWS(h *hub.Hub) http.HandlerFunc {
 			log.Printf("Failed to upgrade connection: %v", err)
 			return
 		}
-		h.Register(conn)
+		if !h.Register(conn) {
+			conn.WriteMessage(websocket.TextMessage, []byte("server full"))
+			conn.Close()
+			return
+		}
 		defer h.Unregister(conn)
 
 		for {

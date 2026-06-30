@@ -141,15 +141,24 @@ type LobbyPlayer struct {
 
 type lobbyReq struct{ resp chan []LobbyPlayer }
 
+// registerReq asks the hub to admit a connection;
+type registerReq struct {
+	conn *websocket.Conn
+	resp chan bool
+}
+
+const defaultMaxPlayers = 200 // safety cap: one shared arena is O(n²), so refuse to grow unbounded
+
 // Hub is the single source of truth for game state.
 type Hub struct {
-	register   chan *websocket.Conn
+	register   chan registerReq
 	unregister chan *websocket.Conn
 	input      chan inputEvent
 	lobby      chan lobbyReq
 	clients    map[*websocket.Conn]*PlayerState
 	tick 	   uint32
 	hist       []histFrame
+	maxPlayers int
 	onSample   func(Sample) // optional behavior-cloning recorder; nil = off
 
 	// lastSent is the world each client was last told about, keyed by player id.
@@ -160,12 +169,20 @@ type Hub struct {
 // New creates a hub with all channels and the client map initialized.
 func New() *Hub {
 	return &Hub{
-		register:   make(chan *websocket.Conn),
+		register:   make(chan registerReq),
 		unregister: make(chan *websocket.Conn),
 		input:      make(chan inputEvent),
 		lobby:      make(chan lobbyReq),
 		clients:    make(map[*websocket.Conn]*PlayerState),
 		lastSent:   make(map[*websocket.Conn]map[string]PlayerState),
+		maxPlayers: defaultMaxPlayers,
+	}
+}
+
+// SetMaxPlayers. Call before Run.
+func (h *Hub) SetMaxPlayers(n int) {
+	if n > 0 {
+		h.maxPlayers = n
 	}
 }
 
@@ -181,9 +198,13 @@ func (h *Hub) Lobby() []LobbyPlayer {
 // each tick while exactly two players are in the arena. Set before Run.
 func (h *Hub) Record(fn func(Sample)) { h.onSample = fn }
 
-// Register adds a connection as a new player. Blocks until the run loop
-// accepts it.
-func (h *Hub) Register(conn *websocket.Conn) { h.register <- conn }
+// Register asks the run loop to admit a connection. Returns false if the arena
+// is already at maxPlayers.
+func (h *Hub) Register(conn *websocket.Conn) bool {
+	resp := make(chan bool, 1)
+	h.register <- registerReq{conn: conn, resp: resp}
+	return <-resp
+}
 
 // Unregister removes a connection
 func (h *Hub) Unregister(conn *websocket.Conn) { h.unregister <- conn }
@@ -203,7 +224,12 @@ func (h *Hub) Run() {
 
 	for {
 		select {
-		case conn := <-h.register:
+		case req := <-h.register:
+			if len(h.clients) >= h.maxPlayers {
+				req.resp <- false // arena full — handler will reject
+				continue
+			}
+			conn := req.conn
 			id := conn.RemoteAddr().String()
 			// Spread spawns across the arena so players start apart, not stacked:
 			// first at 30% width, second at 70%, both vertically centered.
@@ -215,6 +241,7 @@ func (h *Hub) Run() {
 			if welcome, err := msgpack.Marshal(map[string]any{"you": id}); err == nil {
 				conn.WriteMessage(websocket.BinaryMessage, welcome)
 			}
+			req.resp <- true
 			log.Printf("Client registered: %v", id)
 
 		case conn := <-h.unregister:
