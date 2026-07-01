@@ -1,64 +1,81 @@
-# Gonet
+# GONET
 
-A 2-player real-time game over WebSockets, built to learn production netcode:
-a fixed-timestep authoritative server, per-player input buffering, a binary
-MessagePack wire protocol, and delta-encoded snapshots. Go server, vanilla JS +
-Canvas client.
+**Real-time multiplayer netcode-inspired game in Go** — client-side prediction, server
+reconciliation, and entity interpolation that make milliseconds of lag *disappear*.
+The game is two circles in an arena; built to solve network latency problems in online games.
 
-## Run
+[![Live demo](https://img.shields.io/badge/▶_play_it_live-gonet.onrender.com-2ea44f)](https://gonet.onrender.com/)
+![Go](https://img.shields.io/badge/Go-1.26-00ADD8?logo=go&logoColor=white)
+![Protocol](https://img.shields.io/badge/wire-WebSocket_+_MessagePack-blue)
+![Deploy](https://img.shields.io/badge/deploy-Docker_·_Render-2496ED?logo=docker&logoColor=white)
 
-```bash
-go run ./cmd/server          # serves http://localhost:8080
-# or
-docker compose up --build -d
-docker compose logs -f        # follow server logs
-docker compose down
+<p align="center">
+  <img src="assets/demo.gif" alt="Prediction hiding lag — the green dot moves instantly while the amber server position trails behind" width="760">
+
+</p>
+
+## Why it's interesting
+
+The netcode *is* the project. Every technique that makes online games feel
+instant — despite lag, jitter, and diverging state — is built from scratch and
+visible live in the on-screen HUD:
+
+- ⚡ **Client-side prediction** — your move applies instantly; no round-trip wait.
+- 🎯 **Server reconciliation** — the authoritative server corrects mispredictions
+  *invisibly* (no rubber-banding, even at 500 ms of lag).
+- 🌊 **Entity interpolation** — opponents glide smoothly between 20 Hz snapshots.
+- 🎬 **Lag compensation** — hits are judged against what the attacker actually saw.
+- 📦 **Binary delta protocol** — MessagePack snapshots, ~½ the bytes of full state.
+- 🔒 **Fixed-timestep authoritative server** — deterministic 20 Hz simulation; a
+  single goroutine owns all state, so there are **no mutexes**.
+- 🤖 **A behavior-cloning AI opponent** — a tiny MLP trained on human play,
+  connecting as an ordinary WebSocket client. Practice against a live bot lobby.
+
+Load-tested with a custom harness to its **O(n²) failure point** (~150 concurrent
+clients) and profiled with `pprof` — zero goroutine leaks.
+
+## Tech stack
+
+`Go` · `gorilla/websocket` · `MessagePack` · `vanilla JS + Canvas` ·
+`Python / numpy` (bot training) · `Docker` · `Render`
+
+## Play
+
+Use arrow keys or WASD to move your circle. Charge into your opponent to drain them. 
+
+- **Live:** **[gonet.onrender.com](https://gonet.onrender.com/)**
+- **Local:**
+  ```bash
+  go run ./cmd/server     # http://localhost:8080
+  ```
+  Then `/play` (open two tabs to play yourself) or `/play?mode=practice` (a
+  server-populated bot lobby).
+
+## How it works
+
+The full design — the six-stage pipeline a keypress travels, the single-owner
+concurrency model, the wire protocol, lag compensation, the AI bot, benchmarks,
+and how to run/verify everything — lives in **[ARCHITECTURE.md](ARCHITECTURE.md)**.
+
+## Repo layout
+
+```
+cmd/server     wires the hubs, HTTP routes, embedded assets
+cmd/bot        headless WebSocket bot (MLP or heuristic)
+cmd/loadtest   concurrent-client load harness
+internal/hub   tick loop, physics, collisions, lag comp, delta encoding
+internal/bot   the bot's decision logic
+client/        the game UI (prediction · reconciliation · interpolation)
+site/          the landing page
+scripts/       train_bot.py — behavior-cloning trainer
 ```
 
-Open two browser tabs at http://localhost:8080 and move with the arrow keys.
-`GET /health` returns `ok` for liveness checks.
+## What's next
 
-## Wire protocol
+**Rooms** (2-player sharding → O(1) per session → thousands of concurrent games)
+and **self-play RL bots** (to beat the behavior-cloning ceiling). Details in
+[ARCHITECTURE.md](ARCHITECTURE.md).
 
-MessagePack over WebSocket, 20 Hz fixed tick.
+---
 
-- **Client → Server** — `InputMsg { dx, dy, seq, tick }`, sent every tick.
-- **Server → Client** — snapshot delta `{ tick_id, players: [changed fields], removed: [ids] }`.
-
-Each snapshot is a **per-client delta**: only the player fields that changed
-since that client's previous frame are sent, and players who disappeared are
-listed under `removed`. The client merges each delta onto a persistent world
-map rather than replacing state wholesale.
-
-## Benchmarks
-
-Measured on a 2-player world, 11th-gen i5-11400H
-(`go test -bench . -benchmem ./internal/hub`).
-
-### Wire size per snapshot
-
-| Encoding                                     | Bytes | vs JSON full |
-|----------------------------------------------|------:|-------------:|
-| JSON, full snapshot                          |   171 |            — |
-| MessagePack, full snapshot                   |   183 |         +7 % |
-| MessagePack delta, one player moving         |   102 |        −40 % |
-| MessagePack delta, steady state (no motion)  |    91 |        −47 % |
-
-MessagePack *alone* is marginally larger than JSON here: the payload is
-dominated by string keys and `float64` values, which JSON writes compactly. The
-real win is **delta encoding**, which roughly halves steady-state bandwidth. The
-91 B floor is per-player `ackseq`, currently broadcast to every client even
-though each client only needs its own — a planned optimization.
-
-### Tick processing
-
-| Operation                  | Time    | Allocs/op |
-|----------------------------|--------:|----------:|
-| `ComputeDelta` (2 players) | ~0.8 µs |        11 |
-| Marshal full snapshot      | ~1.0 µs |         6 |
-
-The tick budget is 50 ms (20 Hz); building and encoding a snapshot runs in
-single-digit microseconds — about four orders of magnitude under budget. The
-server logs `tick_ms` once per second and warns on any tick exceeding 40 ms.
-
-
+[play it live →](https://gonet.onrender.com/)

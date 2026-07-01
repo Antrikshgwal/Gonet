@@ -8,7 +8,7 @@ single keypress travels through.
 
 ## Topology
 
-![alt text](image.png)
+<img src="assets/Topology.png" alt="Topology: a single hub goroutine owns all state, with one goroutine per connection and channels at the edges" width="720">
 
 
 A `cmd/bot` client and the `cmd/loadtest` harness connect over the *same*
@@ -66,7 +66,7 @@ that one.
 
 ## Whole keypress pipeline
 
-![alt text](image-1.png)
+<img src="assets/pipeline.png" alt="Pipeline: Predict → Send → Simulate → Snapshot → Reconcile → Interpolate" width="720">
 
 ### 1 · Predict (client)
 Pressing a key applies the move to a local copy (`localState`) **immediately**,
@@ -146,6 +146,16 @@ walls. The key insight: behavior cloning imitates the demonstrator, so the bot
 approaches "plays like you" but can't exceed you; beating that ceiling needs
 self-play RL.
 
+**In production the bot is server-managed.** There are two isolated arenas — a
+PvP hub (real players only) and a practice hub — so nobody can inject bots into
+someone's real match. When a human joins practice (`/play?mode=practice`), the
+server maintains a shifting population of in-process bots (each an ordinary
+loopback WebSocket client) with randomized skill (`aggro`) and lifetimes, so it
+feels like a live lobby; they stop spawning once the arena empties. Each bot
+targets its **nearest** opponent — so in a crowd they fight each other rather
+than gang up on the human — eases off in a rhythm, and retreats when outmatched,
+which keeps it beatable.
+
 ## Scaling and known limits
 
 Measured with `cmd/loadtest` (N concurrent headless clients in one arena):
@@ -162,10 +172,77 @@ scales to thousands of independent games. The single-arena numbers are a
 deliberate worst case. `pprof` (localhost:6060) confirms goroutines return to
 baseline after load — no leak.
 
+## Benchmarks
+
+Measured on a 2-player world (`go test -bench . -benchmem ./internal/hub`,
+11th-gen i5-11400H).
+
+Wire size per snapshot:
+
+| Encoding | Bytes | vs JSON full |
+|---|--:|--:|
+| JSON, full snapshot | 171 | — |
+| MessagePack, full snapshot | 183 | +7 % |
+| MessagePack delta, one player moving | 102 | −40 % |
+| MessagePack delta, steady state | 91 | −47 % |
+
+MessagePack alone is a wash here (string keys + `float64`s dominate); the win is
+delta encoding, which roughly halves steady-state bandwidth.
+
+Tick processing:
+
+| Operation | Time | Allocs/op |
+|---|--:|--:|
+| `ComputeDelta` (2 players) | ~0.8 µs | 11 |
+| Marshal full snapshot | ~1.0 µs | 6 |
+
+A 50 ms tick budget against single-digit-µs work is ~4 orders of magnitude of
+headroom.
+
+## Running & verifying locally
+
+```bash
+go run ./cmd/server        # http://localhost:8080  (/play · /play?mode=practice)
+```
+
+Every netcode concept is observable live in the client's HUD:
+
+| Feature | How to see it |
+|---|---|
+| prediction | `/play?lag=200` — your dot is instant; the amber server ghost trails (`drift`) |
+| reconciliation | `/play?lag=500` — no rubber-banding; `corr` spikes only on collisions/respawns |
+| interpolation | two tabs, one `/play?jitter=100` — the other player stays smooth |
+| lag compensation | `go test -run TestCollisionLagCompensation -v ./internal/hub` |
+| delta bandwidth | DevTools → Network → WS → Messages — frame sizes shrink when idle |
+
+Tests, benchmarks, load test, and profiling:
+
+```bash
+go test ./...
+go test -bench . -benchmem ./internal/hub
+go run ./cmd/loadtest -clients 150 -dur 10s        # watch tick_ms (MAX_PLAYERS caps at 200)
+go tool pprof localhost:6060/debug/pprof/profile?seconds=10
+```
+
+Training clone (Python + numpy):
+
+```bash
+RECORD=games.jsonl go run ./cmd/server              # play a few minutes; appends across runs
+python scripts/train_bot.py games.jsonl bot_model.json
+go run ./cmd/bot -model bot_model.json              # or -aggro 0.4, or -model none for heuristic
+```
+
+## Deploy
+
+One static binary, all assets embedded; it listens on `$PORT` (or `:8080`), so
+any Docker host works. Free option is **Render**: push to GitHub, then
+**New → Blueprint** (it reads `render.yaml`). HTTPS is enforced and the client
+switches to `wss://` on its own. `fly.toml` is also included (Fly is paid).
+
 ## Repository layout
 
 ```
-cmd/server     main.go — wires the hub, HTTP routes, embedded static files
+cmd/server     main.go — wires the hubs, HTTP routes, embedded static files
 cmd/bot        headless WebSocket player (MLP or heuristic)
 cmd/loadtest   concurrent-client load harness
 internal/hub   tick loop, physics, collisions, lag comp, delta encoding
